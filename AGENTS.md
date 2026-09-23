@@ -18,7 +18,8 @@ is, and `SETUP.md` covers the development setup.
     (`qkv_attention`, `LayerNorm`, `residual_norm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
     `Array`. Host/device crossings go through `on_device_of`, `to_host` and `gather_columns`.
 - **`LayaMetalExt` rules** (learned the hard way; details and minimal examples in
-  `docs/agents/workarounds.md`):
+  `docs/agents/workarounds.md`, the speed-up itself and how to measure in
+  `docs/agents/metal-performance.md`):
   - `release!` never frees a device buffer: Metal.jl passes kernel arguments by GPU address,
     so freeing a buffer that queued work still reads is a use-after-free. Released buffers
     go to the pool (`pooled`, keyed by queue, element type and size) and are reused in
