@@ -36,8 +36,9 @@ It forwards BLAS process-wide, so every CPU model in the process uses Accelerate
 `MtlArray`s ([`Laya.adapt_arrays`](@ref)). The model code is generic over array types; the
 extension `LayaMetalExt` specializes a few hot spots for `MtlArray`:
 
-- fused Metal kernels for LayerNorm (statistics in `Float32`), GeGLU, and the split, RoPE and
-  head layout of attention;
+- fused Metal kernels for LayerNorm (one threadgroup per column, statistics in `Float32`),
+  fused with the preceding residual sum ([`Laya.residual_norm`](@ref)), including across
+  layers; GeGLU; and the split, RoPE and head layout of attention;
 - all heads and batch rows of attention in two batched MPSGraph matmuls, with the softmax in
   `Float32`;
 - intermediates are returned to Metal.jl's pool as soon as they are dead

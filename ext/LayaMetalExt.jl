@@ -1,7 +1,8 @@
 module LayaMetalExt
 
 using Laya: Laya, LayerNorm
-using Metal: Metal, MetalBackend, MtlArray, @metal, thread_position_in_grid_1d
+using Metal: Metal, MetalBackend, MtlArray, MtlThreadGroupArray, @metal, threadgroup_barrier,
+    thread_position_in_grid_1d, thread_position_in_threadgroup_1d, threadgroup_position_in_grid_1d
 using Metal.MPSGraphs: graph_matmul!
 
 # `Laya.load(repo; backend=MetalBackend())`. The model code in Laya is generic over array
@@ -28,36 +29,73 @@ end
 
 # ---------------------------------------------------------------------------- LayerNorm
 
-# One thread per column; statistics in Float32 as MLX's fast.layer_norm (also for Float16).
-function layernorm_kernel(y, x, w, b, d, ncol, eps)
-    j = tid()
-    if j <= ncol
-        o = (j - Int32(1)) * d
-        s = 0.0f0
-        for i in Int32(1):d
+const REDUCE_THREADS = 256   # threads per threadgroup for per-column reductions (power of 2)
+
+"""Tree reduction of `v` over the threadgroup; every thread gets the result."""
+@inline function threadgroup_reduce(op, v::Float32, tid::Int32)
+    shared = MtlThreadGroupArray(Float32, REDUCE_THREADS)
+    @inbounds shared[tid] = v
+    threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+    s = Int32(REDUCE_THREADS ÷ 2)
+    while s > Int32(0)
+        tid <= s && (@inbounds shared[tid] = op(shared[tid], shared[tid+s]))
+        threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+        s ÷= Int32(2)
+    end
+    r = @inbounds shared[1]
+    threadgroup_barrier(Metal.MemoryFlagThreadGroup)
+    r
+end
+
+# One threadgroup per column; statistics in Float32 as MLX's fast.layer_norm (also for
+# Float16). With `r !== nothing` the column is first replaced by the residual sum `x + r`,
+# which is also written to `z`.
+function layernorm_kernel(y, z, x, r, w, b, d, eps)
+    col = Int32(threadgroup_position_in_grid_1d())
+    tid = Int32(thread_position_in_threadgroup_1d())
+    o = (col - Int32(1)) * d
+    s = 0.0f0
+    for i in tid:Int32(REDUCE_THREADS):d
+        if r === nothing
             @inbounds s += Float32(x[o+i])
+        else
+            @inbounds v = x[o+i] + r[o+i]
+            @inbounds z[o+i] = v
+            s += Float32(v)
         end
-        μ = s / d
-        v = 0.0f0
-        for i in Int32(1):d
-            @inbounds v += abs2(Float32(x[o+i]) - μ)
-        end
-        r = 1.0f0 / sqrt(v / d + eps)
-        for i in Int32(1):d
-            @inbounds t = (Float32(x[o+i]) - μ) * r * Float32(w[i])
-            b === nothing || (@inbounds t += Float32(b[i]))
-            @inbounds y[o+i] = t
-        end
+    end
+    μ = threadgroup_reduce(+, s, tid) / d
+    src = r === nothing ? x : z
+    q = 0.0f0
+    for i in tid:Int32(REDUCE_THREADS):d
+        @inbounds q += abs2(Float32(src[o+i]) - μ)
+    end
+    inv_σ = 1.0f0 / sqrt(threadgroup_reduce(+, q, tid) / d + eps)
+    for i in tid:Int32(REDUCE_THREADS):d
+        @inbounds t = (Float32(src[o+i]) - μ) * inv_σ * Float32(w[i])
+        b === nothing || (@inbounds t += Float32(b[i]))
+        @inbounds y[o+i] = t
     end
     return
 end
 
-function (ln::LayerNorm)(x::MtlArray{T}) where {T}
+function launch_layernorm!(y, z, x, r, ln::LayerNorm)
     d = size(x, 1)
     ncol = length(x) ÷ d
+    @metal threads=REDUCE_THREADS groups=ncol layernorm_kernel(y, z, x, r, ln.weight, ln.bias, Int32(d), ln.eps)
+end
+
+function (ln::LayerNorm)(x::MtlArray{T}) where {T}
     y = similar(x)
-    launch!(layernorm_kernel, ncol, y, x, ln.weight, ln.bias, d, ncol, ln.eps; threads=64)
+    launch_layernorm!(y, nothing, x, nothing, ln)
     y
+end
+
+function Laya.residual_norm(x::MtlArray{T}, r::MtlArray{T}, ln::LayerNorm) where {T}
+    z, y = similar(x), similar(x)
+    launch_layernorm!(y, z, x, r, ln)
+    Laya.release!(r)
+    z, y
 end
 
 # ---------------------------------------------------------------------------- GeGLU
@@ -127,28 +165,28 @@ function split_rope_kernel(q, k, v, qkv, c, s, hd, H, L, total, userope)
     return
 end
 
-# Masked softmax over keys, one thread per (query, head, batch) column of S `(Lk, Lq, H*B)`;
-# `mask` is `(Lk, Mq, B)` with `Mq` either `Lq` or 1 (`true` keeps a key).
-function masked_softmax_kernel(P, S, mask, Lk, Lq, H, Mq, ncol, usemask)
-    col = tid()
-    if col <= ncol
-        n, qi = divmod1(col, Lq)
-        b = (n - Int32(1)) ÷ H + Int32(1)
-        o = (col - Int32(1)) * Lk
-        mo = ((Mq == Int32(1) ? Int32(1) : qi) - Int32(1)) * Lk + (b - Int32(1)) * Lk * Mq
-        keep(j) = !usemask || @inbounds mask[mo+j]
-        m = -Inf32
-        for j in Int32(1):Lk
-            keep(j) && (@inbounds m = max(m, S[o+j]))
-        end
-        t = 0.0f0
-        for j in Int32(1):Lk
-            @inbounds t += keep(j) ? exp(S[o+j] - m) : 0.0f0
-        end
-        r = 1.0f0 / t
-        for j in Int32(1):Lk
-            @inbounds P[o+j] = keep(j) ? exp(S[o+j] - m) * r : 0.0f0
-        end
+# Masked softmax over keys, one threadgroup per (query, head, batch) column of S
+# `(Lk, Lq, H*B)`; `mask` is `(Lk, Mq, B)` with `Mq` either `Lq` or 1 (`true` keeps a key).
+function masked_softmax_kernel(P, S, mask, Lk, Lq, H, Mq, usemask)
+    col = Int32(threadgroup_position_in_grid_1d())
+    tid = Int32(thread_position_in_threadgroup_1d())
+    n, qi = divmod1(col, Lq)
+    b = (n - Int32(1)) ÷ H + Int32(1)
+    o = (col - Int32(1)) * Lk
+    mo = ((Mq == Int32(1) ? Int32(1) : qi) - Int32(1)) * Lk + (b - Int32(1)) * Lk * Mq
+    keep(j) = !usemask || @inbounds mask[mo+j]
+    m = -Inf32
+    for j in tid:Int32(REDUCE_THREADS):Lk
+        keep(j) && (@inbounds m = max(m, S[o+j]))
+    end
+    m = threadgroup_reduce(max, m, tid)
+    t = 0.0f0
+    for j in tid:Int32(REDUCE_THREADS):Lk
+        @inbounds t += keep(j) ? exp(S[o+j] - m) : 0.0f0
+    end
+    r = 1.0f0 / threadgroup_reduce(+, t, tid)
+    for j in tid:Int32(REDUCE_THREADS):Lk
+        @inbounds P[o+j] = keep(j) ? exp(S[o+j] - m) * r : 0.0f0
     end
     return
 end
@@ -177,7 +215,7 @@ function Laya.qkv_attention(qkv::MtlArray{T,3}, H::Integer, base, mask, scale::R
     usemask = mask isa AbstractArray
     m = usemask ? mask : S
     Mq = usemask ? size(mask, 2) : 1
-    launch!(masked_softmax_kernel, L * N, P, S, m, L, L, H, Mq, L * N, usemask)
+    @metal threads=REDUCE_THREADS groups=L*N masked_softmax_kernel(P, S, m, Int32(L), Int32(L), Int32(H), Int32(Mq), usemask)
     out = MtlArray{T}(undef, hd, L, N)
     graph_matmul!(out, v, P, true, false, 'N', 'N')                    # (hd, L_q, H*B)
     y = MtlArray{T}(undef, d, L, B)

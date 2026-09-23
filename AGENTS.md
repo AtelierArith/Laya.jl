@@ -15,7 +15,7 @@ is, and `SETUP.md` covers the development setup.
     - `MetalBackend()` (Metal.jl's own type) → `LayaMetalExt`.
   - The model code (`src/layers.jl`, `src/model.jl`) is generic over array types. Device
     backends move the weights with `adapt_arrays` and specialize hot spots by array type
-    (`qkv_attention`, `LayerNorm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
+    (`qkv_attention`, `LayerNorm`, `residual_norm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
     `Array`. Host/device crossings go through `on_device_of`, `to_host` and `gather_columns`.
 - **`LayaMLX/` is a separate package** that is not registered and uses a local dylib. It
   depends on `Laya`, never the other way round, and plugs in as `MLXBackend()`. It is not a

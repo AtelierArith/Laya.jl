@@ -47,6 +47,7 @@ Laya.on_device_of
 Laya.to_host
 Laya.gather_columns
 Laya.release!
+Laya.residual_norm
 Laya.qkv_attention
 Laya.attention
 Laya.rope

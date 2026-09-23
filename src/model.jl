@@ -13,23 +13,31 @@ struct EncoderLayer{T}
     Wo_mlp::Linear
 end
 
-function (layer::EncoderLayer{T})(x, mask) where {T}
+function (layer::EncoderLayer)(x, mask)
+    h = layer.attn_norm === nothing ? x : layer.attn_norm(x)
+    first(layer(x, h, mask, nothing))
+end
+
+# `h` is `attn_norm(x)` (or `x` itself for the first layer), computed by the previous layer;
+# returns the output `y` and `next_norm(y)` (`nothing` when `next_norm === nothing`), so the
+# residual sum at the end of a layer and the next normalization run as one fused step.
+function (layer::EncoderLayer{T})(x, h, mask, next_norm) where {T}
     d, L, B = size(x)
     H = layer.num_heads
     hd = d ÷ H
-    h = layer.attn_norm === nothing ? x : layer.attn_norm(x)
     qkv = layer.Wqkv(h)
     h === x || release!(h)
     a = qkv_attention(qkv, H, layer.base, mask, T(hd)^T(-0.5))
     release!(qkv)
-    x1 = residual(x, layer.Wo(a))
+    x1, h1 = residual_norm(x, layer.Wo(a), layer.mlp_norm)
     release!(a)
-    u = layer.Wi(layer.mlp_norm(x1))
+    u = layer.Wi(h1)
+    release!(h1)
     g = gelu_gate(u)
     release!(u)
-    y = residual(x1, layer.Wo_mlp(g))
+    y, hn = residual_norm(x1, layer.Wo_mlp(g), next_norm)
     release!(g, x1)
-    y
+    y, hn
 end
 
 struct ModernBert{T}
@@ -66,13 +74,16 @@ function (m::ModernBert)(input_ids, attention_mask; trace=nothing)
     trace === nothing || (trace["embeddings"] = x)
     masks = map(mk -> on_device_of(x, mk), attention_masks(attention_mask, m.config.local_attention))
     trace === nothing || (trace["mask_full"] = masks.full; trace["mask_sliding"] = masks.sliding)
+    first_norm = m.layers[1].attn_norm
+    h = first_norm === nothing ? x : first_norm(x)
     for (i, layer) in enumerate(m.layers)
-        y = layer(x, layer.kind === :full_attention ? masks.full : masks.sliding)
+        next_norm = i < length(m.layers) ? m.layers[i+1].attn_norm : m.final_norm
+        y, h = layer(x, h, layer.kind === :full_attention ? masks.full : masks.sliding, next_norm)
         trace === nothing ? release!(x) : (trace["layer_$(i-1)"] = y)
         x = y
     end
-    trace === nothing && release!(masks...)
-    m.final_norm(x)
+    trace === nothing && release!(x, masks...)
+    h    # final_norm of the last layer's output
 end
 
 struct HeadLayer
@@ -90,9 +101,10 @@ function (layer::HeadLayer)(x::AbstractArray{T}, mask) where {T}
     H = layer.num_heads
     hd = d ÷ H
     a = qkv_attention(layer.in_proj(layer.norm1(x)), H, nothing, mask, T(hd)^T(-0.5))
-    x = x .+ layer.out_proj(a)
+    x1, h = residual_norm(x, layer.out_proj(a), layer.norm2)
+    release!(a)
     # PyTorch TransformerEncoderLayer defaults to ReLU; the encoder and scorer use GELU.
-    x .+ layer.linear2(relu.(layer.linear1(layer.norm2(x))))
+    residual(x1, layer.linear2(relu.(layer.linear1(h))))
 end
 
 """

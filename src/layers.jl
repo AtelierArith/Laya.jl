@@ -28,6 +28,15 @@ release_one!(::AbstractArray) = nothing
 """`x .+ y` that frees `y` (a temporary) afterwards."""
 residual(x, y) = (z = x .+ y; release!(y); z)
 
+"""
+    residual_norm(x, y, ln) -> (z, ln(z))
+
+The residual sum `z = x .+ y` and its normalization, freeing `y`. Device backends fuse both
+into one kernel.
+"""
+residual_norm(x, y, ln) = (z = residual(x, y); (z, ln(z)))
+residual_norm(x, y, ::Nothing) = (residual(x, y), nothing)
+
 """`E[:, idx]` for a host index vector `idx`, on `E`'s device."""
 gather_columns(E::AbstractMatrix, idx::AbstractVector{<:Integer}) = E[:, on_device_of(E, Int32.(idx))]
 gather_columns(E::Matrix, idx::AbstractVector{<:Integer}) = E[:, idx]
