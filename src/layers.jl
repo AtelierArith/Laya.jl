@@ -41,6 +41,15 @@ residual_norm(x, y, ::Nothing) = (residual(x, y), nothing)
 gather_columns(E::AbstractMatrix, idx::AbstractVector{<:Integer}) = E[:, on_device_of(E, Int32.(idx))]
 gather_columns(E::Matrix, idx::AbstractVector{<:Integer}) = E[:, idx]
 
+# Elementwise steps of the model, as functions so that device backends can run them as one
+# kernel into pooled memory instead of an allocating broadcast.
+"""`f.(x)`."""
+elementwise(f, x::AbstractArray) = f.(x)
+"""`x .+ v` with `v` `(d, B)` added to every column of `x` `(d, L, B)`."""
+add_columns(x::AbstractArray{T,3}, v::AbstractMatrix) where {T} = x .+ reshape(v, :, 1, size(x, 3))
+"""`h[:, j, :]`: column `j` of every sequence of `h` `(d, L, B)`."""
+columns_at(h::AbstractArray{T,3}, j::Integer) where {T} = h[:, j, :]
+
 """Linear layer; `weight` is stored `(in, out)`, i.e. PyTorch/MLX `(out, in)` reversed."""
 struct Linear{M<:AbstractMatrix,V<:Union{Nothing,AbstractVector}}
     weight::M
