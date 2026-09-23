@@ -1,5 +1,8 @@
 # Laya.jl
 
+[![Dev docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://atelierarith.github.io/Laya.jl/dev/)
+[![CI](https://github.com/AtelierArith/Laya.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/AtelierArith/Laya.jl/actions/workflows/CI.yml)
+
 Laya.jl runs [Laya](https://github.com/NandhaKishorM/laya) typed-decision models in Julia.
 It answers `choice`, `score` and `noul` questions about a state in a single encoder forward
 pass, with no token-by-token generation.
@@ -103,17 +106,28 @@ Every backend is checked against the Python implementation (see `test/runtests.j
   in float32 and about 2e-3 in float16.
 - **`LayaMLX`**: bit-identical (0.0 error) in float32 and float16, on both checkpoints.
 
-Apple M4, `aac6fef/laya-mlx`, float32, end-to-end p50:
+Apple M4, `aac6fef/laya-mlx`, float32, end-to-end p50 (tokenization, prompts, forward,
+calibration and results; model loading excluded). `short:N` asks N questions about a short
+state (93 tokens); `long:N` uses a state that fills the 512-token context.
 
-| backend | 1 question | 10 questions | 50 questions |
-|---|---:|---:|---:|
-| Python laya-mlx (MLX GPU) | 41 ms | 318 ms | 1575 ms |
-| `LayaMLX` (MLX GPU via mlx-c) | 42 ms | 315 ms | 1599 ms |
-| `Laya` (CPU, Accelerate) | 109 ms | 796 ms | 5366 ms |
+| backend | short:1 | short:10 | short:50 | long:1 | long:10 |
+|---|---:|---:|---:|---:|---:|
+| Python laya-mlx (MLX GPU) | 41 ms | 312 ms | 1602 ms | 190 ms | 2456 ms |
+| `LayaMLX` (MLX GPU via mlx-c) | 42 ms | 312 ms | 1609 ms | 196 ms | 3312 ms |
+| `Laya` + `MetalBackend()` (GPU) | 62 ms | 339 ms | 1937 ms | 245 ms | 4890 ms |
+| `Laya` + `AccelerateBackend()` (CPU) | 109 ms | 796 ms | 5366 ms | – | – |
 
-`Laya` on Metal (float32) took 63 ms for 1 question and 367 ms for 10 questions in a first
-run on a warm GPU (MLX: 42 ms and about 390 ms in the same state). For few questions, the
-per-kernel launch overhead still dominates.
+- **How the GPU rows were measured**: from a cooled machine, in the order Metal, LayaMLX,
+  Python, Python, LayaMLX, Metal. Each ran in its own process with 90 s pauses in between.
+  The table shows each backend's faster run (10 iterations after 2 warmups). The script and
+  raw results are in `benchmark/results/gpu-fair-2026-09-23/`. The CPU row is from an
+  earlier run.
+- **Answers**: every backend selected the same answers on every workload.
+- **Heat**: sustained GPU load throttles this machine. Later runs were up to 2× slower,
+  especially `long:10`, so treat differences at `long:10` with care.
+- **Reading the results**: `LayaMLX` matches Python up to 50 short questions. The Metal
+  backend is within 10-20% for batches of questions, but slower for a single question
+  (62 ms vs 41 ms), where the launch overhead of its per-op kernels dominates.
 
 See `benchmark/` for the method and the raw results.
 
@@ -141,7 +155,8 @@ Not ported yet:
 
 Known gaps:
 
-- `MetalBackend` is slower than MLX for one or a few questions (kernel launch overhead).
+- `MetalBackend` is slower than MLX for a single question (62 ms vs 41 ms; kernel launch
+  overhead) and for long inputs.
 
 ## Acknowledgements
 
