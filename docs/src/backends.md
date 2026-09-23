@@ -36,12 +36,13 @@ It forwards BLAS process-wide, so every CPU model in the process uses Accelerate
 `MtlArray`s ([`Laya.adapt_arrays`](@ref)). The model code is generic over array types; the
 extension `LayaMetalExt` specializes a few hot spots for `MtlArray`:
 
-- one fused attention kernel ([`Laya.qkv_attention`](@ref)): a threadgroup takes 32 queries
+- one fused attention kernel ([`Laya.qkv_attention`](@ref)): a threadgroup takes 64 queries
   of one head, stages the Q, K and V tiles in threadgroup memory (RoPE and the scale applied
-  on the way in), multiplies them on the simdgroup matrix units and writes the output in the
-  layout of the output projection. The score and probability matrices never reach device
-  memory, tiles whose mask is all false (outside the local window, padding) are skipped, and
-  the softmax runs in `Float32`;
+  on the way in), multiplies them on the simdgroup matrix units, keeps the output
+  accumulator in registers and writes it in the layout of the output projection. The score
+  and probability matrices never reach device memory, key tiles outside the local window
+  (read from the [`Laya.AttentionMask`](@ref)) are not visited and tiles whose mask is all
+  false (padding) are skipped, and the softmax runs in `Float32`;
 - LayerNorm with one simdgroup per column (statistics in `Float32`), fused with the preceding
   residual sum ([`Laya.residual_norm`](@ref)), including across layers; and GeGLU;
 - the linear layers through Metal.jl's cached MPSGraph matmuls, encoded into the batched

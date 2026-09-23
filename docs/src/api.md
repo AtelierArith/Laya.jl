@@ -49,6 +49,7 @@ Laya.gather_columns
 Laya.release!
 Laya.residual_norm
 Laya.qkv_attention
+Laya.AttentionMask
 Laya.attention
 Laya.rope
 ```

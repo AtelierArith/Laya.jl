@@ -119,7 +119,8 @@ Array(out)[1:3]    # [1, 2, 3], not [0, 1, 2]
 ```
 
 `simd_shuffle_xor(v, Int16(mask))` itself behaves as documented (lane `i` gets lane
-`i ⊻ mask`).
+`i ⊻ mask`). `simd_shuffle(v, lane)` takes a **1-based** lane (it passes `lane - 1` to
+`air.simd_shuffle`): `simd_shuffle(v, Int16(4q))` reads the wrong lane; use `4q + 1`.
 
 ## 5. `simdgroup_load` transpose flag and column-major arrays
 
@@ -135,7 +136,10 @@ Updating a tuple of simdgroup matrices with `ntuple(i -> mma(load(...), b, acc[i
 inside a loop fails with `unsupported dynamic function invocation (call to getindex)`: the
 closure captures `acc`, which is reassigned in the loop, so Julia boxes it. Pass the tuple
 through a helper function instead (`acc = mma_k(acc, Kt, hb, q)` where the `ntuple` closure
-captures only the helper's arguments).
+captures only the helper's arguments). The same holds for `map(f -> ..., acc)` and for a
+`ntuple` over several such tuples: every closure must capture only values that are not
+reassigned in the enclosing scope. The error also shows up as `call to
+jl_f_throw_methoderror`.
 
 ## 7. Kernels defined at the top level of a script
 
@@ -228,6 +232,10 @@ variants that held a few more values (P fragments across a barrier, a diagonal r
 matrix, `valid`/`window` mask logic) dropped to 448 or 384 and ran 25-35% slower at L=512,
 B=10 although they did less work per tile. Threadgroup memory limits the same way (32 KB per
 core: 12 KB allows 2 threadgroups, 20 KB one). Check both before judging a kernel change.
+The threadgroup size matters with them: 8 simdgroups on 16 KB (64 queries per threadgroup)
+ran the attention 25% faster than 4 simdgroups on 12 KB with the same work per simdgroup,
+while 16 queries per simdgroup (more fragments live) dropped to 384 threads and was slower,
+and 16-key tiles (12 KB, 576 threads) did not help.
 
 ## 17. Reading and writing simdgroup matrix elements
 
@@ -238,4 +246,7 @@ and columns after `+ 1`); the other slots repeat them. Writing a fragment as
 `ntuple(i -> i == 1 ? VecElement(a) : i == 2 ? VecElement(b) : m[i], Val(64))` and storing
 it works (the layout MLX's `thread_elements()` relies on). A row reduction of a column is a
 shuffle-xor over lane bits 1, 2 and 4. An attention kernel that ran the whole softmax on
-fragments this way was correct but slower than the shipped one (item 16).
+fragments this way was correct but slower than the shipped one (item 16). Scaling only the
+two elements (the online-softmax rescale of O, one factor per query taken with
+`simd_shuffle` from the lane that owns the query) is cheap and is what the shipped kernel
+does; it also writes its output straight from the fragments.

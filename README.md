@@ -123,19 +123,20 @@ asks N questions about a short state (93 tokens); `long:N` uses a state that fil
 
 | backend | short:1 | short:10 | short:50 | long:1 | long:10 |
 |---|---:|---:|---:|---:|---:|
-| Python laya-mlx (MLX GPU) | 17 ms | 94 ms | 410 ms | 55 ms | 481 ms |
-| `Laya` + `MetalBackend()` (GPU) | 17 ms | 89 ms | 386 ms | 56 ms | 475 ms |
+| Python laya-mlx (MLX GPU) | 17 ms | 93 ms | 410 ms | 56 ms | 480 ms |
+| `Laya` + `MetalBackend()` (GPU) | 16 ms | 88 ms | 386 ms | 53 ms | 453 ms |
 
 - **How the GPU rows were measured**: on an idle machine (load average below 4 for two
-  minutes), cooled for 120 s, in the order Metal, Python, Python, Metal with 60 s pauses in
-  between, each in its own process. The table shows each backend's faster run (10 iterations
-  after 2 warmups). The script and raw results are in
-  `benchmark/results/gpu-fair-2026-09-23-m2max-2/`; the first round on this machine, before
-  the matmuls were batched and the uploads pooled, is in `gpu-fair-2026-09-23-m2max/`
-  (Metal 23 / 97 / 402 / 66 / 501 ms).
+  minutes), cooled for 120 s, in the order Metal, Metal (previous version), Python, Python,
+  Metal (previous version), Metal with 60 s pauses in between, each in its own process. The
+  table shows each backend's faster run (10 iterations after 2 warmups). The script and raw
+  results are in `benchmark/results/gpu-fair-2026-09-23-m2max-3/`; the previous version
+  (before the attention kernel's third round) ran 17 / 89 / 385 / 55 / 474 ms there. The
+  earlier rounds on this machine are in `gpu-fair-2026-09-23-m2max-2/` and
+  `gpu-fair-2026-09-23-m2max/` (Metal 23 / 97 / 402 / 66 / 501 ms, before the matmuls were
+  batched and the uploads pooled).
 - **Answers**: both backends selected the same answers on every workload.
-- **Reading the results**: the Metal backend is as fast as MLX for a single question and
-  4-6% faster from 10 questions upwards. The whole forward pass is a few command buffers
+- **Reading the results**: the Metal backend is 4-6% faster than MLX on every workload. The whole forward pass is a few command buffers
   (matmuls and kernels batched together), uploads never wait for the GPU, and a warm forward
   pass makes about a dozen small allocations. Other CPU load distorts the Metal numbers far
   more than the MLX ones (see `docs/agents/workarounds.md`).
@@ -170,9 +171,11 @@ Not ported yet:
 
 Known gaps:
 
-- `MetalBackend`'s attention kernel is still about 3x slower than MLX's
-  `scaled_dot_product_attention` on 512-token inputs (hidden behind the matmuls in the
-  totals above); the softmax goes through threadgroup memory, MLX's stays in registers.
+- `MetalBackend`'s attention kernel is still about 2x slower than MLX's
+  `scaled_dot_product_attention` in the global-attention layers on 512-token inputs (3.9 vs
+  2.0 ms per layer at 10 questions; the local-attention layers are faster than MLX's, which
+  do not skip the tiles outside the window); the softmax goes through threadgroup memory,
+  MLX's stays in registers.
 
 ## Acknowledgements
 
