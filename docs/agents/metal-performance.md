@@ -7,15 +7,16 @@ it was found, with the numbers that justified each step. The pitfalls met on the
 
 ## Where it ended
 
-End-to-end p50 (`benchmark/results/gpu-fair-2026-09-23-m2max-2/`, fair ABBA order on an idle
-machine):
+End-to-end p50 (`benchmark/results/gpu-fair-2026-09-23-m2max-3/`, fair order on an idle
+machine, each backend's faster run):
 
 | | short:1 | short:10 | short:50 | long:1 | long:10 |
 |---|---:|---:|---:|---:|---:|
-| Python MLX | 16.9 ms | 93.7 ms | 410 ms | 55.5 ms | 481 ms |
+| Python MLX | 17.0 ms | 93.5 ms | 410 ms | 55.5 ms | 480 ms |
 | Metal, start (M4, before this work) | 62 | 339 | 1937 | 245 | 4890 |
 | Metal, after PR #2 | 23 | 97 | 402 | 66 | 501 |
-| Metal, now | 16.7 | 89.1 | 386 | 55.7 | 475 |
+| Metal, after PR #3 | 16.6 | 89.0 | 385 | 55.4 | 474 |
+| Metal, now (attention third round, 8 below) | 16.2 | 88.2 | 386 | 53.3 | 453 |
 
 ## How to measure
 
@@ -105,6 +106,33 @@ forward went from 44 to 14.
 `air.fast_exp.f32` is 1.7x faster than `air.exp.f32` at 1e-6 relative error, and the softmax
 kernels spend a sixth of their time in exp. MLX compiles everything with fast math.
 
+### 8. Attention: 64 queries per threadgroup, O in registers, window tile range (third round)
+
+An ablation of the attention kernel (run it with one part switched off at a time; the results
+are wrong but the times tell where they go) showed the simdgroup matrix products and their
+fragment loads from threadgroup memory taking 3.3 of 3.95 ms at L=512, B=10, the staging
+1.5 ms (overlapped), the softmax 0.5 ms and the tile-skip barriers 0.15 ms. Three changes,
+microbenchmarked per layer at L=512, B=10 (full / sliding):
+
+- **O rescale in registers** (`scale_frag`, item 17): each lane scales its two elements by
+  the factor of their query, taken with `simd_shuffle` from the lane that owns the query in
+  the softmax. Drops the store/scale/load round trip through threadgroup memory and three
+  barriers per tile, register use unchanged (512 threads): 5.24 -> 5.00 ms.
+- **8 simdgroups, 64 queries per threadgroup** (Q staged in two halves through the same
+  buffer, 16 KB): each staged K/V tile serves twice the queries, still two threadgroups per
+  core: -> 3.90 ms full. The output is written from the fragments directly.
+- **Window tile range**: `Laya.qkv_attention` reads `valid` and `window` from the
+  `AttentionMask`, and the kernel loops only over the key tiles the block's window can reach
+  (all tiles if a query of the block is padding). Before, every out-of-window tile still
+  paid the mask read and two barriers to be skipped: sliding 1.88 -> 1.51 ms.
+
+End to end (same session, main as a git worktree, order new/main/Python/Python/main/new):
+long:10 474 -> 453 ms, long:1 55.4 -> 53.3 ms, short inputs unchanged within 0.5 ms. The
+prototypes were kernels in a script module next to the extension (`FA13` etc.), checked
+against the CPU attention for padding, holes and both dtypes before timing; the extension
+copy was then timed against the script copy once, since the two have compiled differently
+before (a loop over the Q halves in place of two explicit stages cost 5%).
+
 ## What did not work
 
 - **Register-resident softmax (MLX style).** Reading and writing the two elements each lane
@@ -123,13 +151,23 @@ kernels spend a sixth of their time in exp. MLX compiles everything with fast ma
   from the output (item 1b).
 - **Raising `JULIA_METAL_COMMAND_BATCHING_OPS`**: no effect (the flushes came from the
   matmuls' own command buffers, see 4).
+- **Tile skipping from `valid`/`window` inside the loop** (no barriers, per-simdgroup
+  ballot): 448 threads, 25% slower; the ballot on `valid` alone: no gain. Computing the loop
+  bounds once (8, third item) is what paid.
+- **16 queries per simdgroup** (each K/V fragment feeds two products): the extra fragments
+  dropped occupancy to 384 threads, 1.4-1.6x slower.
+- **16-key tiles** (12 KB, 576 threads): 7% slower at L=512 (twice the barriers per key).
+- **Choosing 32 or 64 queries per threadgroup by the input**: 32 was 6% faster at L=93,
+  B=10 in the microbenchmark, about 0.4 ms of an 89 ms forward: not worth a heuristic.
 
 ## What is left
 
-- The attention kernel is still about 3x MLX's `scaled_dot_product_attention` at L=512,
-  B=10 (6.2 vs 2.0 ms per layer), hidden behind the matmuls in the totals. The remaining
-  ideas all need more registers or memory per threadgroup, so they need a different tiling
-  (e.g. 64 queries per threadgroup with the O rescale done in halves) to keep occupancy.
+- In the global-attention layers the kernel is still about 2x MLX's RoPE +
+  `scaled_dot_product_attention` at L=512, B=10 (3.9 vs 2.0 ms per layer; the local layers
+  are 1.5 vs 2.1 ms, ahead because MLX does not skip out-of-window tiles). The products are
+  bound by fragment loads from threadgroup memory; every way found so far to reuse a loaded
+  fragment more costs registers and occupancy (16 queries per simdgroup: 384 threads).
+  Pre-roped K in device memory would save the RoPE in the staging (about 4%).
 - Two downloads per forward remain; the action head needs host-side features between them.
 - MPSGraph enqueue is still the CPU-side cost per product; a custom skinny GEMM for N <= 128
   would be the next step for single-question latency, but the matmuls are already ahead of
