@@ -11,6 +11,7 @@ using Metal: GPUArrays, MPS
 using Metal.MPSGraphs: MatmulGraphKey, CachedMatmulGraph, _matmul_graph_cache, _matmul_graph_cache_lock,
     MPSGraphTensor, MPSGraphTensorData, default_exec_desc
 using Metal.ObjectiveC.Foundation: @autoreleasepool, NSDictionary, nil
+using PrecompileTools: @setup_workload, @compile_workload
 
 # `Laya.load(repo; backend=MetalBackend())`. The model code in Laya is generic over array
 # types; this extension moves the weights to the GPU and specializes the hot spots for
@@ -792,6 +793,53 @@ function attention_unfused(qkv::MtlArray{T,3}, H::Integer, base, mask, scale::Re
     launch!(merge_heads_kernel, (d, L, B), y, out, hd, H, L)
     Laya.release!(q, k, v, S, P, out)
     y
+end
+
+# ---------------------------------------------------------------------------- precompilation
+
+# The first `predict` on a Metal model spends most of its time in Julia compilation (92.9% of
+# an 8.7 s call; the forward itself is ~23 ms) and nothing on the CPU path warms it. Run a
+# tiny forward here so the whole Metal path (model load, every kernel, MPSGraph products,
+# `predict`) lives in the extension image. Metal's `__init__` is skipped while precompiling,
+# so the MetalPerformanceShadersGraph framework is loaded by hand; Metal discards the command
+# buffers its kernels are encoded into while precompiling, so nothing actually runs on the
+# GPU. The extension's own pools hold session-local buffers and are emptied before the image
+# is written (Metal's own caches are process-local and never serialized).
+@setup_workload begin
+    @compile_workload begin
+        if ccall(:jl_generating_output, Cint, ()) != 0
+            Metal.load_framework("MetalPerformanceShadersGraph")
+            Metal.initialized[] = true
+            try
+                mktempdir() do root
+                    # hidden 1024 / heads 16 / head_dim 64 and two head layers, as the shipped
+                    # checkpoints, so the fused attention, the `Val`-specialized LayerNorm and
+                    # the head are the real specializations.
+                    dir = Laya.write_tiny_checkpoint(joinpath(root, "metal"); hidden_size=1024,
+                        num_attention_heads=16, intermediate_size=64, num_hidden_layers=2, head_layers=2)
+                    agent = Laya.load(dir; backend=MetalBackend())
+                    questions = Dict(
+                        "topic" => Dict("type" => "choice", "instructions" => "Choose", "criteria" => ["a", "b", "c"]),
+                        "team" => Dict("type" => "choice", "instructions" => "Route", "criteria" => Dict("x" => "first", "y" => "second")),
+                        "level" => Dict("type" => "score", "instructions" => "Level", "criteria" => ["low", "high"]),
+                        "yes" => Dict("type" => "noul", "instructions" => "Is this true?"),
+                    )
+                    Laya.predict(agent, "hello world", questions)
+                    Laya.predict(agent, Dict("body" => "hello", "items" => [1, 2.5, nothing, true]), questions)
+                end
+            finally
+                empty!(POOL)
+                empty!(GRAVE)
+                empty!(UPLOAD_FREE)
+                empty!(UPLOAD_PENDING)
+                empty!(ROPE_TABLES)
+                POOL_BYTES[] = 0
+                GRAVE_BYTES[] = 0
+                UPLOAD_PENDING_BYTES[] = 0
+                Metal.initialized[] = false
+            end
+        end
+    end
 end
 
 end

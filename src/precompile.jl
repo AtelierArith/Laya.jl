@@ -24,7 +24,9 @@ function write_safetensors(path, tensors::AbstractDict{String,<:Array{Float16}})
     end
 end
 
-function write_tiny_checkpoint(dir; metaspace::Bool=false)
+function write_tiny_checkpoint(dir; metaspace::Bool=false, hidden_size::Integer=64,
+                               num_attention_heads::Integer=1, intermediate_size::Integer=96,
+                               num_hidden_layers::Integer=2, head_layers::Integer=1)
     specials = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]
     if metaspace
         pieces = ["▁"; string.(collect("abcdefghijklmnopqrstuvwxyz{}\":,.?")); ["<0x$(uppercase(string(b; base=16, pad=2)))>" for b in 0:255]]
@@ -47,10 +49,11 @@ function write_tiny_checkpoint(dir; metaspace::Bool=false)
     write(joinpath(dir, "tokenizer", "tokenizer_config.json"), JSON.json(Dict(
         "pad_token" => "[PAD]", "cls_token" => "[CLS]", "sep_token" => "[SEP]", "mask_token" => "[MASK]")))
 
-    cfg = Dict("model_type" => "modernbert", "vocab_size" => length(vocab), "hidden_size" => 64,
-               "intermediate_size" => 96, "num_hidden_layers" => 2, "num_attention_heads" => 1,
+    cfg = Dict("model_type" => "modernbert", "vocab_size" => length(vocab), "hidden_size" => hidden_size,
+               "intermediate_size" => intermediate_size, "num_hidden_layers" => num_hidden_layers,
+               "num_attention_heads" => num_attention_heads,
                "local_attention" => 16, "max_position_embeddings" => 256)
-    agent_cfg = Dict("encoder" => "precompile/tiny", "head_layers" => 1, "max_len" => 128, "head_max_len" => 32,
+    agent_cfg = Dict("encoder" => "precompile/tiny", "head_layers" => head_layers, "max_len" => 128, "head_max_len" => 32,
                      "act_costs" => Dict("escalate" => 0.5), "temperature" => [1.3, 1.1, 2.0])
     mkpath(joinpath(dir, "encoder"))
     write(joinpath(dir, "encoder", "config.json"), JSON.json(cfg))
