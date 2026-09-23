@@ -36,13 +36,13 @@ jobs:
       JULIA_CONDAPKG_BACKEND: 'Null'
       JULIA_PYTHONCALL_EXE: python
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - uses: julia-actions/setup-julia@v2
+      - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
-      - uses: julia-actions/cache@v2
+      - uses: julia-actions/cache@v3
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
