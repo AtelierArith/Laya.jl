@@ -95,6 +95,14 @@ function (layer::HeadLayer)(x::AbstractArray{T}, mask) where {T}
     x .+ layer.linear2(relu.(layer.linear1(layer.norm2(x))))
 end
 
+"""
+    DecisionModel{T}
+
+The Laya network: a ModernBERT encoder, the decision-head Transformer layers, the option
+scorer and the action head, with parameters of element type `T`. Load one with
+[`load_model`](@ref) (or through [`load`](@ref)); call it on a [`collate`](@ref)d batch.
+Its weights may live in any array type (see [`adapt_arrays`](@ref)).
+"""
 struct DecisionModel{T}
     encoder::ModernBert{T}
     head::Vector{HeadLayer}

@@ -280,4 +280,9 @@ function predict(agent::Agent, state, questions::AbstractDict)
     )
 end
 
+"""
+    system_one(agent, state, questions) -> JSON.Object
+
+The same as [`predict`](@ref), under upstream Laya's name.
+"""
 const system_one = predict

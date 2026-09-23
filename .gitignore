@@ -6,3 +6,6 @@ __pycache__/
 
 # mlx-c install prefix (see SETUP.md)
 /deps/usr/
+
+# Documenter output
+/docs/build/

@@ -1,0 +1,9 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Laya = "b6f2eeaf-f276-4b2b-a62d-07adb813aeaf"
+
+[sources]
+Laya = {path = ".."}
+
+[compat]
+Documenter = "1"
