@@ -113,6 +113,13 @@ must be run locally before pushing changes to the model, tokenizer or prompts.
 - **Precompilation**: `src/precompile.jl` runs `load` and `predict` on a tiny random checkpoint
   (byte-level and Metaspace BPE tokenizers) at precompile time. Extend it when adding code paths
   that every user hits, and re-measure time to first `predict`.
+- **Type stability**: the model structs (`EncoderLayer`, `ModernBert`, `HeadLayer`,
+  `DecisionModel`) carry their layers' concrete types as parameters; keep new fields
+  concretely typed. The forward pass is inferred end to end except for the five batch
+  lookups at its entry (`Dict{String, Array}`). Check with JET in a temporary environment:
+  `Pkg.activate(; temp=true); Pkg.develop(path="."); Pkg.add("JET")`, then
+  `JET.@report_opt target_modules=(Laya,) agent.model(batch)` and read
+  `JET.get_reports(result)` (the printed summary alone is easy to misread).
 - **Style**: match the surrounding code. Keep comments short and only where they explain why,
   and keep docstrings on the public API.
 
