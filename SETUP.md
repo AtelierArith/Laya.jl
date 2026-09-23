@@ -9,14 +9,15 @@ What each part of the repository needs:
 | use or test `LayaMLX` | the above, plus mlx-c built into `deps/usr` (Apple silicon only) |
 | run `benchmark/` | everything above, plus the checkpoints in the Hugging Face cache |
 
-`extern/` and `deps/usr/` are gitignored. `deps/mlx-c` is a git submodule.
+`extern/laya-mlx` and `deps/mlx-c` are git submodules; `deps/usr/` (the mlx-c build) is
+gitignored.
 
 ## 1. Clone
 
 ```bash
-git clone --recursive <this repo> Laya.jl && cd Laya.jl
+git clone --recursive https://github.com/AtelierArith/Laya.jl.git && cd Laya.jl
 # or, in an existing clone:
-git submodule update --init deps/mlx-c
+git submodule update --init
 ```
 
 `deps/mlx-c` is pinned at `ebc88f1`, the mlx-c `main` commit that supports MLX v0.32.2.
@@ -28,9 +29,10 @@ The upstream Python implementation. It is the ground truth for the tests and a b
 benchmarks. Its MLX is also the `libmlx.dylib` that LayaMLX links against. Requires
 [uv](https://docs.astral.sh/uv/).
 
+The submodule is pinned at `0a85951`, the upstream version the port follows. Create its
+venv:
+
 ```bash
-git clone https://github.com/mizorewww/laya-mlx.git extern/laya-mlx
-git -C extern/laya-mlx checkout 0a859518634112655cb97c745dbf04f5191aaf13   # version used for the port
 cd extern/laya-mlx
 uv sync --extra dev --extra reference --default-index https://pypi.org/simple
 cd ../..
@@ -39,7 +41,8 @@ cd ../..
 - The `reference` extra brings torch and transformers. `tiny_checkpoint` and the reference
   trace use them.
 - Upstream's `uv.lock` points at a PyPI mirror (tuna.tsinghua). With `--default-index`, uv
-  resolves against PyPI instead, so `uv.lock` shows local changes. Leave them uncommitted.
+  resolves against PyPI instead, so `uv.lock` shows local changes. Leave them uncommitted
+  (`.gitmodules` sets `ignore = dirty`, so they do not show up in this repository's status).
 - Check that MLX is 0.32.x, because mlx-c is built for it:
 
   ```bash

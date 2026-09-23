@@ -1,3 +1,7 @@
 [submodule "deps/mlx-c"]
 	path = deps/mlx-c
 	url = https://github.com/ml-explore/mlx-c.git
+[submodule "extern/laya-mlx"]
+	path = extern/laya-mlx
+	url = https://github.com/mizorewww/laya-mlx.git
+	ignore = dirty

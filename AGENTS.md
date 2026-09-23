@@ -81,7 +81,9 @@ accident.
 
 ## Repository hygiene
 
-- `extern/`, `deps/usr/`, `Manifest.toml` and `LocalPreferences.toml` are gitignored.
+- `extern/laya-mlx` (upstream, pinned at `0a85951`) and `deps/mlx-c` are submodules. Move a
+  pin only on purpose: the port and its tests follow that upstream version.
+- `deps/usr/`, `Manifest.toml` and `LocalPreferences.toml` are gitignored.
   `LocalPreferences.toml` holds absolute paths for this machine.
 - Do not commit absolute local paths. Benchmark JSON records only `basename`s for libraries.
 - `extern/laya-mlx/uv.lock` has local changes (a PyPI index instead of a mirror). Leave them

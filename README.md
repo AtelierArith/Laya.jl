@@ -128,6 +128,7 @@ See `benchmark/` for the method and the raw results.
 | `reference/` | `LayaMLXReference`: a PythonCall bridge to `extern/laya-mlx`, used only for testing |
 | `benchmark/` | Python, CPU, Metal and MLX benchmarks (see `benchmark/README.md`) |
 | `deps/` | the `mlx-c` submodule and `build.sh` |
+| `extern/laya-mlx` | upstream laya-mlx (submodule): the Python reference for tests and benchmarks |
 
 `SETUP.md` describes the development setup: the Python reference in `extern/laya-mlx`, the
 mlx-c build and the checkpoints.
