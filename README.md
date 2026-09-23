@@ -1,6 +1,6 @@
 # Laya.jl
 
-Laya.jl runs [Laya](https://github.com/mizorewww/laya-mlx) typed-decision models in Julia.
+Laya.jl runs [Laya](https://github.com/NandhaKishorM/laya) typed-decision models in Julia.
 It answers `choice`, `score` and `noul` questions about a state in a single encoder forward
 pass, with no token-by-token generation.
 
@@ -145,6 +145,11 @@ Known gaps:
 
 ## Acknowledgements
 
-Laya is by Convai Innovations. The MLX port and the converted checkpoints are by
-[mizorewww/laya-mlx](https://github.com/mizorewww/laya-mlx) (Apache-2.0). Laya.jl is an
-independent port and is not affiliated with either project.
+- [Laya](https://github.com/NandhaKishorM/laya) (Apache-2.0) is by Convai Innovations and the
+  Laya contributors. The original weights are on Hugging Face, e.g.
+  [convaiinnovations/laya](https://huggingface.co/convaiinnovations/laya).
+- [laya-mlx](https://github.com/mizorewww/laya-mlx) (Apache-2.0), the MLX port Laya.jl follows,
+  and its converted checkpoints ([aac6fef](https://huggingface.co/aac6fef)) are by the laya-mlx
+  contributors.
+
+Laya.jl is an independent port and is not affiliated with either project.
