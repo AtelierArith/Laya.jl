@@ -8,12 +8,18 @@ is, and `SETUP.md` covers the development setup.
 - **`Laya` (`src/`) is pure Julia and OS-independent.**
   - Hard dependencies are JSON, Scratch, Downloads and LinearAlgebra. Do not add Python,
     binary or platform-specific packages to `[deps]`.
-  - Platform speedups are weak dependencies or package extensions:
-    - `AppleAccelerate` is already a weak dependency. Laya only prints a hint; it never loads
-      it.
-    - A planned `LayaMetalExt` will use Metal.jl.
+  - Platform speedups are weak dependencies with package extensions in `ext/`, selected with
+    `load(...; backend=...)` by dispatch on the backend type:
+    - `AccelerateBackend()` → `LayaAppleAccelerateExt`. Laya only prints a hint; it never loads
+      AppleAccelerate itself.
+    - `MetalBackend()` (Metal.jl's own type) → `LayaMetalExt`.
+  - The model code (`src/layers.jl`, `src/model.jl`) is generic over array types. Device
+    backends move the weights with `adapt_arrays` and specialize hot spots by array type
+    (`qkv_attention`, `LayerNorm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
+    `Array`. Host/device crossings go through `on_device_of`, `to_host` and `gather_columns`.
 - **`LayaMLX/` is a separate package** that is not registered and uses a local dylib. It
-  depends on `Laya`, never the other way round. It is not a weak dependency of `Laya`.
+  depends on `Laya`, never the other way round, and plugs in as `MLXBackend()`. It is not a
+  weak dependency of `Laya`.
 - **PythonCall appears only in `reference/` (`LayaMLXReference`) and in the test
   environments.**
 - **The tokenizer stays pure Julia.**
@@ -42,11 +48,14 @@ is, and `SETUP.md` covers the development setup.
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'                          # Laya (needs extern/ + LocalPreferences)
 LAYA_TEST_BLAS=accelerate julia --project=. -e 'using Pkg; Pkg.test()' # same, with Accelerate BLAS
+LAYA_TEST_METAL=1 LAYA_TEST_GROUPS=backends \
+    julia --project=. -e 'using Pkg; Pkg.test()'                      # Metal backend vs reference
 julia --project=LayaMLX/test LayaMLX/test/runtests.jl                  # LayaMLX ops + tiny checkpoint
 LAYAMLX_TEST_REPOS=aac6fef/laya-mlx LAYAMLX_TEST_DTYPES=float32 \
     julia --project=LayaMLX/test LayaMLX/test/runtests.jl              # one real checkpoint
 julia --project=reference -e 'using Pkg; Pkg.test()'                   # the Python bridge
 benchmark/run.sh                                                       # see benchmark/README.md
+BACKENDS=metal DTYPE=float16 benchmark/run.sh                          # Metal only
 cd LayaMLX/gen && julia --project=. generator.jl                       # regenerate src/LibMLX.jl
 deps/build.sh                                                          # rebuild mlx-c into deps/usr
 ```

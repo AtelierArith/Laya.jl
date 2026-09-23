@@ -4,6 +4,7 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 Laya = "b6f2eeaf-f276-4b2b-a62d-07adb813aeaf"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [sources]

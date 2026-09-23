@@ -1,6 +1,37 @@
 # Building blocks on plain Julia arrays. Activations have size `(features, L, B)`: the
 # row-major `(B, L, features)` layout of the Python implementation with axes reversed.
 
+# Host <-> device glue. The model code is written against `AbstractArray`; weights may live in
+# any array type (e.g. `Metal.MtlArray`) while inputs, masks and outputs are host `Array`s.
+
+"""
+    on_device_of(ref, x) -> array
+
+`x` (a host array) in the same kind of array as `ref`: `x` itself when `ref` is an `Array`.
+"""
+on_device_of(::Array, x::AbstractArray) = x
+on_device_of(ref::AbstractArray, x::AbstractArray) = copyto!(similar(ref, eltype(x), size(x)), convert(Array, x))
+
+"""`x` as a host `Array` (no copy when it already is one)."""
+to_host(x::Array) = x
+to_host(x::AbstractArray) = Array(x)
+
+"""
+    release!(arrays...)
+
+Hint that intermediate `arrays` are no longer used. A no-op for host arrays; device backends
+return the memory to their pool at once (Julia's GC does not see device memory pressure).
+"""
+release!(xs...) = foreach(release_one!, xs)
+release_one!(::AbstractArray) = nothing
+
+"""`x .+ y` that frees `y` (a temporary) afterwards."""
+residual(x, y) = (z = x .+ y; release!(y); z)
+
+"""`E[:, idx]` for a host index vector `idx`, on `E`'s device."""
+gather_columns(E::AbstractMatrix, idx::AbstractVector{<:Integer}) = E[:, on_device_of(E, Int32.(idx))]
+gather_columns(E::Matrix, idx::AbstractVector{<:Integer}) = E[:, idx]
+
 """Linear layer; `weight` is stored `(in, out)`, i.e. PyTorch/MLX `(out, in)` reversed."""
 struct Linear{M<:AbstractMatrix,V<:Union{Nothing,AbstractVector}}
     weight::M
@@ -48,11 +79,28 @@ function rope(x::AbstractArray{T,4}, base::Real) where {T}
     lb = log2(Float32(base))
     inv_freq = [exp2(-(Float32(i) / Float32(half)) * lb) for i in 0:half-1]
     θ = inv_freq .* reshape(Float32.(0:L-1), 1, L)          # (half, L)
-    c = reshape(T.(cos.(θ)), half, 1, L, 1)
-    s = reshape(T.(sin.(θ)), half, 1, L, 1)
+    c = on_device_of(x, reshape(T.(cos.(θ)), half, 1, L, 1))
+    s = on_device_of(x, reshape(T.(sin.(θ)), half, 1, L, 1))
     x1 = @view x[1:half, :, :, :]
     x2 = @view x[half+1:hd, :, :, :]
     vcat(x1 .* c .- x2 .* s, x1 .* s .+ x2 .* c)
+end
+
+"""
+    qkv_attention(qkv, heads, rope_base, mask, scale) -> (d, L, B)
+
+Multi-head self-attention from the fused projection `qkv` `(3d, L, B)` (`[q; k; v]` along the
+first axis), with RoPE on `q` and `k` unless `rope_base === nothing`. The unit that device
+backends specialize (e.g. one fused kernel for the split, RoPE and head layout).
+"""
+function qkv_attention(qkv::AbstractArray{T,3}, H::Integer, base, mask, scale::Real) where {T}
+    d, L, B = size(qkv, 1) ÷ 3, size(qkv, 2), size(qkv, 3)
+    x = reshape(qkv, d ÷ H, H, 3, L, B)
+    q, k, v = x[:, :, 1, :, :], x[:, :, 2, :, :], x[:, :, 3, :, :]
+    if base !== nothing
+        q, k = rope(q, base), rope(k, base)
+    end
+    reshape(attention(q, k, v, mask, scale), d, L, B)
 end
 
 """

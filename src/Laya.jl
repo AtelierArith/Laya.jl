@@ -10,7 +10,7 @@ using JSON
 using LinearAlgebra
 using Scratch: @get_scratch!
 
-export Agent, DecisionModel, EncoderConfig, Tokenizer, load, load_model, load_safetensors, predict, system_one
+export AccelerateBackend, Agent, Backend, CPUBackend, DecisionModel, EncoderConfig, Tokenizer, load, load_model, load_safetensors, predict, system_one
 
 include("safetensors.jl")
 include("mathfns.jl")
@@ -21,6 +21,7 @@ include("model.jl")
 include("weights.jl")
 include("tokenizer.jl")
 include("prompt.jl")
+include("backends.jl")
 include("agent.jl")
 
 end # module Laya

@@ -11,17 +11,18 @@ same checkpoints, prompt format, calibration and output schema.
   - Pure Julia on the CPU, so it runs on any OS.
   - Includes the safetensors reader, the ModernBERT encoder and decision head, the Hugging
     Face tokenizer and the prompt builder.
-  - Depends only on JSON, Scratch and the standard libraries.
+  - Depends only on JSON, Scratch and the standard libraries. Apple Accelerate (CPU) and
+    Metal.jl (GPU) are optional package extensions.
 - **`LayaMLX`** (`LayaMLX/`): the same forward pass on Apple's MLX (GPU), through the mlx-c C
-  API. It is a separate package for Apple silicon, and `Laya` does not depend on it.
+  API. It is a separate package for Apple silicon that plugs into `Laya` as a backend, and
+  `Laya` does not depend on it.
 
 ## Quick start
 
 ```julia
 using Laya
-using AppleAccelerate   # optional, on Apple silicon: ~3-5× faster CPU inference
 
-agent = Laya.load("aac6fef/laya-mlx")   # downloaded on first use
+agent = Laya.load("aac6fef/laya-mlx")   # CPU; downloaded on first use
 result = predict(agent, "I was billed twice. Please refund the duplicate.",
     Dict("department" => Dict(
         "type" => "choice",
@@ -38,6 +39,38 @@ result["answers"]["department"]
   - `noul`: P(true) for a proposition.
 - **`state`**: a string, or a dictionary or vector that is serialized as JSON.
 - **Result**: `model`, `answers` and `usage`, as upstream Laya returns them.
+
+### Backends
+
+`load` picks where the model forward runs with `backend`. Everything else (`predict`, the
+tokenizer, prompts, calibration and the result) is the same Julia code for every backend.
+
+```julia
+agent = Laya.load("aac6fef/laya-mlx"; backend=CPUBackend())         # default
+
+using AppleAccelerate                                               # CPU, Accelerate BLAS
+agent = Laya.load("aac6fef/laya-mlx"; backend=AccelerateBackend())
+
+using Metal                                                         # Apple GPU
+agent = Laya.load("aac6fef/laya-mlx"; dtype=Float16, backend=MetalBackend())
+
+using LayaMLX                                                       # Apple GPU via MLX
+agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
+```
+
+| backend | runs on | package |
+|---|---|---|
+| `CPUBackend()` | CPU (any OS) | – |
+| `AccelerateBackend()` | CPU, BLAS through Apple Accelerate | AppleAccelerate (weak dependency) |
+| `MetalBackend()` | Apple GPU, Float32 or Float16 | Metal.jl (weak dependency; Metal.jl's own backend type) |
+| `MLXBackend()` | Apple GPU through mlx-c | `LayaMLX` (`LayaMLX/`) |
+
+- `AccelerateBackend` forwards BLAS process-wide, so every CPU model in the process uses
+  Accelerate afterwards.
+- `MetalBackend` runs the same `DecisionModel` code with its weights in `MtlArray`s. Laya
+  specializes a few hot spots for `MtlArray` (fused Metal kernels for LayerNorm, GeGLU and the
+  attention glue, and batched matmuls over all heads).
+- A new backend only needs a method of `Laya.load_backend_model(backend, dir, dtype)`.
 
 ### Checkpoints
 
@@ -61,11 +94,13 @@ The `Float32` model of the 421M checkpoint needs about 3 GiB of memory.
 
 ## Accuracy and speed
 
-Both `Laya` and `LayaMLX` are checked against the Python implementation (see
-`test/runtests.jl` and `LayaMLX/test/runtests.jl`):
+Every backend is checked against the Python implementation (see `test/runtests.jl` and
+`LayaMLX/test/runtests.jl`):
 
-- **`Laya` (CPU)**: every answer matches, and the relative error is below the noise MLX shows
+- **CPU**: every answer matches, and the relative error is below the noise MLX shows
   between its own float32 GPU and CPU results.
+- **Metal**: the selected answers match. The relative error of the logits is about 1e-6
+  in float32 and about 2e-3 in float16.
 - **`LayaMLX`**: bit-identical (0.0 error) in float32 and float16, on both checkpoints.
 
 Apple M4, `aac6fef/laya-mlx`, float32, end-to-end p50:
@@ -76,6 +111,10 @@ Apple M4, `aac6fef/laya-mlx`, float32, end-to-end p50:
 | `LayaMLX` (MLX GPU via mlx-c) | 42 ms | 315 ms | 1599 ms |
 | `Laya` (CPU, Accelerate) | 109 ms | 796 ms | 5366 ms |
 
+`Laya` on Metal (float32) took 63 ms for 1 question and 367 ms for 10 questions in a first
+run on a warm GPU (MLX: 42 ms and about 390 ms in the same state). For few questions, the
+per-kernel launch overhead still dominates.
+
 See `benchmark/` for the method and the raw results.
 
 ## Repository layout
@@ -84,9 +123,10 @@ See `benchmark/` for the method and the raw results.
 |---|---|
 | `src/` | the `Laya` package |
 | `test/` | tests against the Python reference |
+| `ext/` | package extensions: `LayaAppleAccelerateExt` and `LayaMetalExt` |
 | `LayaMLX/` | MLX backend. Clang.jl-generated mlx-c bindings, forward pass and benchmark (see `LayaMLX/README.md`). |
 | `reference/` | `LayaMLXReference`: a PythonCall bridge to `extern/laya-mlx`, used only for testing |
-| `benchmark/` | Python, CPU and MLX benchmarks (see `benchmark/README.md`) |
+| `benchmark/` | Python, CPU, Metal and MLX benchmarks (see `benchmark/README.md`) |
 | `deps/` | the `mlx-c` submodule and `build.sh` |
 
 `SETUP.md` describes the development setup: the Python reference in `extern/laya-mlx`, the
@@ -97,9 +137,10 @@ mlx-c build and the checkpoints.
 Not ported yet:
 
 - the router, language detection, presets, email helpers and the shortlist
-- a backend hook that lets `predict` run on `LayaMLX` (for now, `LayaMLX/bench.jl` copies the
-  post-processing)
-- a Metal.jl GPU backend
+
+Known gaps:
+
+- `MetalBackend` is slower than MLX for one or a few questions (kernel launch overhead).
 
 ## Acknowledgements
 

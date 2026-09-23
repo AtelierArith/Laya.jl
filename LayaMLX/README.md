@@ -16,8 +16,10 @@ fit together.
 - `julia --project=LayaMLX -e 'using Pkg; Pkg.instantiate()'`
 
 ```julia
-using LayaMLX
-m = LayaMLX.load(dir; dtype=Float32, device=:gpu)   # Float16, MX.BFloat16; :gpu or :cpu
+using Laya, LayaMLX
+agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())   # Laya.predict with MLX forward
+
+m = LayaMLX.load(dir; dtype=Float32, device=:gpu)   # the model alone; Float16, MX.BFloat16; :gpu or :cpu
 logits, action = m(batch)                             # batch: Laya.collate / reference collate Dict
 logits, action, tr = LayaMLX.forward(m, batch; trace=true)
 ```
@@ -123,12 +125,9 @@ julia --project=LayaMLX/bench LayaMLX/bench.jl --model aac6fef/laya-mlx --dtype 
 julia --project=benchmark benchmark/compare.jl <dir with the json files>
 ```
 
-- **What `bench.jl` reuses**: `Laya.prepare` and `Laya.collate` through a
-  `Laya.Agent` whose CPU model is an empty stub, so no CPU weights are loaded. It also reuses
-  the calibration helpers.
-- **What it copies**: the post-processing loop of `Laya.predict`, with the forward pass
-  swapped for LayaMLX. `predict` is typed on `Agent{T}` with a CPU `DecisionModel{T}`, so it
-  cannot be called directly.
+- **How `bench.jl` runs**: `Laya.load(repo; backend=MLXBackend(:gpu))` and `Laya.predict`.
+  Tokenization, prompts, batching and calibration are `Laya`'s; only the model forward runs
+  on MLX (`Laya.load_backend_model(::MLXBackend, ...)` in `src/backend.jl`).
 - **What the timings include**: `forward` covers upload, MLX evaluation and the copy back to
   Julia.
 
@@ -152,8 +151,7 @@ python-mlx-gpu and julia-cpu rows come from `benchmark/results/`.
 ## Known gaps
 
 - There is no tokenizer or prompt builder here (by design). End-to-end use goes through
-  `Laya` as in `bench.jl`. A proper `Laya` backend hook would remove the copied
-  `predict` loop.
+  `Laya.load(repo; backend=MLXBackend())`.
 - The forward pass runs eagerly. Only `gelu` and `relu` are compiled, as in Python. The whole
   model is not `mx.compile`d, again as in Python.
 - `MX.scoped` and the arena are per task. `MLXArray`s created inside a scope must not escape it.

@@ -10,8 +10,8 @@ runtime (MLX, GPU) on the same checkpoint and workloads.
   - `prepare`: tokenization and prompt building.
   - `forward`: one collated batch of up to `batch_size` (default 64) questions.
   - `e2e`: full `predict` including calibration and result formatting.
-- Backends: `python` (laya-mlx, MLX GPU), `julia` (Laya, CPU) and `mlxc` (LayaMLX, MLX GPU via mlx-c);
-  select with `BACKENDS`.
+- Backends: `python` (laya-mlx, MLX GPU), `julia` (Laya, CPU), `metal` (Laya, Metal.jl GPU)
+  and `mlxc` (LayaMLX, MLX GPU via mlx-c); select with `BACKENDS` (default: `python julia mlxc`).
 - Julia runs with `-t auto` (override with `JULIA_THREADS`); `Laya` loads AppleAccelerate,
   so BLAS calls go to Apple's Accelerate framework.
 - Each backend/checkpoint runs in its own process, one after another, so only one model is

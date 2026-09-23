@@ -3,9 +3,9 @@
 #     julia --project=LayaMLX/bench LayaMLX/bench.jl --model aac6fef/laya-mlx --output out.json
 #
 # Same options, workloads, timing boundaries and JSON schema as benchmark/bench_julia.jl
-# (backend "julia-mlxc-gpu"), so benchmark/compare.jl can summarize the result. Tokenization,
-# prompt building (`Laya.prepare`), batching (`Laya.collate`) and calibration come from
-# the pure-Julia Laya package; only the model forward runs on MLX through mlx-c.
+# (backend "julia-mlxc-gpu"), so benchmark/compare.jl can summarize the result. The agent is
+# `Laya.load(...; backend=MLXBackend(:gpu))`: tokenization, prompts and calibration run in Laya,
+# only the model forward runs on MLX through mlx-c.
 # `forward` is one collated batch including host->device upload, evaluation and the copy of
 # logits/action back to Julia arrays.
 
@@ -18,82 +18,6 @@ using Statistics
 const HERE = @__DIR__
 const ROOT = joinpath(HERE, "..")
 const EXAMPLES = joinpath(ROOT, "extern", "laya-mlx", "examples")
-
-# ---------------------------------------------------------------------------- agent glue
-
-"""A `Laya.Agent` without CPU weights (so `Laya.prepare` can be reused as is)."""
-function tokenizer_agent(dir, model_id, ::Type{T}, batch_size) where {T}
-    cfg = Dict{String,Any}(JSON.parsefile(joinpath(dir, "rl_agent_config.json")))
-    enc = Laya.EncoderConfig(JSON.parsefile(joinpath(dir, "encoder", "config.json")))
-    ln = Laya.LayerNorm(T[], nothing, 1.0f-5)
-    lin = Laya.Linear(Matrix{T}(undef, 0, 0), nothing)
-    stub = Laya.DecisionModel{T}(
-        Laya.ModernBert{T}(enc, Matrix{T}(undef, 0, 0), ln, Laya.EncoderLayer{T}[], ln),
-        Laya.HeadLayer[], Matrix{T}(undef, 0, 0), ln, lin, lin, lin, lin)
-    traw = Float64.(get(cfg, "temperature", [1.0, 1.0, 1.0]))
-    braw = Dict{String,Float64}(String(k) => Float64(v) for (k, v) in get(cfg, "temperature_by_options", Dict()))
-    Laya.Agent{T}(model_id, dir, cfg, enc, Laya.Tokenizer(joinpath(dir, "tokenizer")), stub, batch_size,
-        traw, braw, Laya.clamp_temperature.(traw), Dict(k => Laya.clamp_temperature(v) for (k, v) in braw))
-end
-
-struct MLXAgent
-    agent::Laya.Agent      # tokenizer, config and calibration
-    model::LayaMLX.LayaModel # weights on the MLX device
-end
-
-function load_agent(model_id; dtype, batch_size)
-    dir = Laya.resolve_model(model_id)
-    MLXAgent(tokenizer_agent(dir, model_id, dtype, batch_size), LayaMLX.load(dir; dtype, device=:gpu))
-end
-
-"""`Laya.predict` with the model forward on MLX (post-processing copied from src/agent.jl)."""
-function predict(a::MLXAgent, state, questions::AbstractDict)
-    agent = a.agent
-    items, internal = Laya.prepare(agent, state, questions)
-    qids = collect(keys(questions))
-    answers = JSON.Object{String,Any}()
-    r4 = Laya.r4
-    for start in 1:agent.batch_size:length(items)
-        stop = min(start + agent.batch_size - 1, length(items))
-        chunk = items[start:stop]
-        logits, act = a.model(Laya.collate(chunk, agent.tok.pad_token_id))
-        (all(isfinite, logits) && all(isfinite, act)) || throw(DomainError(logits, "Non-finite model outputs"))
-        act = exp.(act .- maximum(act; dims=1))
-        act ./= sum(act; dims=1)
-        for (row, item) in enumerate(chunk)
-            q = internal[start+row-1]
-            k, qt = length(item.markers), item.qtype
-            scale = get(agent.temperature_by_options, Laya.temp_bucket(qt, k), agent.temperature[qt+1])
-            z = logits[1:k, row] ./ Float32(scale)
-            p = exp.(z .- maximum(z))
-            p ./= sum(p)
-            answer = JSON.Object{String,Any}(
-                "type" => q.t,
-                "confidence" => r4(Laya.confidence_from_probs(p, k)),
-                "action" => JSON.Object{String,Any}("act_probability" => r4(act[1, row])),
-            )
-            if q.t == "choice"
-                labels = first.(q.crit)
-                answer["choice"] = labels[argmax(p)]
-                answer["probabilities"] = JSON.Object{String,Any}(l => r4(v) for (l, v) in zip(labels, p))
-            elseif q.t == "score"
-                answer["score"] = r4(sum((0:k-1) .* Float64.(p)))
-                answer["legend"] = JSON.Object{String,Any}(string(i - 1) => v for (i, v) in enumerate(q.crit))
-                answer["probabilities"] = JSON.Object{String,Any}(string(i - 1) => r4(v) for (i, v) in enumerate(p))
-            else
-                p1 = Float64(p[2])
-                answer["noul"] = r4(p1)
-                answer["confidence"] = r4(max(p1, 1.0 - p1))
-            end
-            answers[string(qids[start+row-1])] = answer
-        end
-    end
-    JSON.Object{String,Any}(
-        "model" => "laya-rl-agent",
-        "answers" => answers,
-        "usage" => JSON.Object{String,Any}("input_tokens" => sum(it -> length(it.ids), items), "output_tokens" => 0),
-    )
-end
 
 # ---------------------------------------------------------------------------- benchmark
 # (option parsing, workloads and measurement identical to benchmark/bench_julia.jl)
@@ -142,7 +66,7 @@ function main(args)
     batch_size = parse(Int, opts["batch-size"])
     warmup, iterations = parse(Int, opts["warmup"]), parse(Int, opts["iterations"])
 
-    load_seconds = @elapsed agent = load_agent(opts["model"]; dtype, batch_size)
+    load_seconds = @elapsed agent = Laya.load(opts["model"]; dtype, batch_size, backend=MLXBackend(:gpu))
     report = Dict{String,Any}(
         "backend" => "julia-mlxc-gpu",
         "created_at" => string(now(UTC)),
@@ -167,12 +91,12 @@ function main(args)
         kind, count = split(name, ":")
         count = parse(Int, count)
         state, questions = workload(spec, kind, count)
-        result = predict(agent, state, questions)
-        items, _ = Laya.prepare(agent.agent, state, questions)
-        batch = Laya.collate(items[1:min(end, batch_size)], agent.agent.tok.pad_token_id)
+        result = Laya.predict(agent, state, questions)
+        items, _ = Laya.prepare(agent, state, questions)
+        batch = Laya.collate(items[1:min(end, batch_size)], agent.tok.pad_token_id)
         forward = measure(() -> agent.model(batch), warmup, iterations)
-        prep = measure(() -> Laya.prepare(agent.agent, state, questions), warmup, iterations)
-        e2e = measure(() -> predict(agent, state, questions), warmup, iterations)
+        prep = measure(() -> Laya.prepare(agent, state, questions), warmup, iterations)
+        e2e = measure(() -> Laya.predict(agent, state, questions), warmup, iterations)
         e2e["questions_per_second"] = count * 1000 / e2e["mean_ms"]
         answers = Dict(k => get(v, "choice", get(v, "score", get(v, "noul", nothing))) for (k, v) in result["answers"])
         push!(report["results"], Dict(

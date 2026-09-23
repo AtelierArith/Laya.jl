@@ -27,8 +27,9 @@ end
 # one repository per process on memory-constrained machines.
 const TEST_REPOS = filter(!isempty, split(get(ENV, "LAYA_TEST_REPOS", "aac6fef/laya-mlx"), ","))
 
-# Test groups to run: LAYA_TEST_GROUPS=math,model,tokenizer,agent (default: all).
-const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "math,model,tokenizer,agent"), ",")
+# Test groups to run: LAYA_TEST_GROUPS=math,model,tokenizer,agent,backends (default: all).
+# LAYA_TEST_METAL=1 adds the Metal.jl backend to "backends" (needs an Apple GPU).
+const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "math,model,tokenizer,agent,backends"), ",")
 
 """Release checkpoints held by finished tests on both the Julia and the Python side."""
 function free_models()
@@ -37,6 +38,37 @@ function free_models()
     mx = R.PythonCall.pyimport("mlx.core")
     mx.clear_cache()
     nothing
+end
+
+const QUESTIONS = Dict(
+    "topic" => Dict("type" => "choice", "instructions" => "Choose", "criteria" => ["a", "b", "c"]),
+    "level" => Dict("type" => "score", "instructions" => "Level", "criteria" => ["low", "high"]),
+    "yes" => Dict("type" => "noul", "instructions" => "Is this true?"),
+)
+
+"""
+Compare every traced activation; returns Dict(key => relative error), i.e. the max abs
+error over valid (unpadded) tokens divided by the reference's max magnitude. ModernBERT's
+residual stream reaches ~2.5e4, so absolute tolerances are meaningless deep in the encoder.
+"""
+function compare_trace(model, ref_agent, batch)
+    expected = R.trace(ref_agent, batch)
+    actual = Dict{String,Any}()
+    model(batch; trace=actual)
+    errs = Dict{String,Float32}()
+    valid = Bool.(batch["attention_mask"])
+    for (k, v) in expected
+        startswith(k, "mask") && continue
+        @test haskey(actual, k)
+        actual[k] = Laya.to_host(actual[k])     # device backends trace device arrays
+        @test size(actual[k]) == size(v)
+        a, e = ndims(v) == 3 ? (actual[k][:, valid], v[:, valid]) : (actual[k], v)
+        errs[k] = maxerr(a, e) / maximum(abs, e)
+    end
+    # Masks: reference (L_k, 1, 1, B) / (L_k, L_q, 1, B); ours (L_k, L_q, B).
+    @test all(Laya.to_host(actual["mask_full"]) .== dropdims(expected["mask_full"]; dims=3))
+    @test Laya.to_host(actual["mask_sliding"]) == dropdims(expected["mask_sliding"]; dims=3)
+    errs
 end
 
 @testset "Laya" verbose=true begin

@@ -1,33 +1,3 @@
-const QUESTIONS = Dict(
-    "topic" => Dict("type" => "choice", "instructions" => "Choose", "criteria" => ["a", "b", "c"]),
-    "level" => Dict("type" => "score", "instructions" => "Level", "criteria" => ["low", "high"]),
-    "yes" => Dict("type" => "noul", "instructions" => "Is this true?"),
-)
-
-"""
-Compare every traced activation; returns Dict(key => relative error), i.e. the max abs
-error over valid (unpadded) tokens divided by the reference's max magnitude. ModernBERT's
-residual stream reaches ~2.5e4, so absolute tolerances are meaningless deep in the encoder.
-"""
-function compare_trace(model, ref_agent, batch)
-    expected = R.trace(ref_agent, batch)
-    actual = Dict{String,Any}()
-    model(batch; trace=actual)
-    errs = Dict{String,Float32}()
-    valid = Bool.(batch["attention_mask"])
-    for (k, v) in expected
-        startswith(k, "mask") && continue
-        @test haskey(actual, k)
-        @test size(actual[k]) == size(v)
-        a, e = ndims(v) == 3 ? (actual[k][:, valid], v[:, valid]) : (actual[k], v)
-        errs[k] = maxerr(a, e) / maximum(abs, e)
-    end
-    # Masks: reference (L_k, 1, 1, B) / (L_k, L_q, 1, B); ours (L_k, L_q, B).
-    @test all(actual["mask_full"] .== dropdims(expected["mask_full"]; dims=3))
-    @test actual["mask_sliding"] == dropdims(expected["mask_sliding"]; dims=3)
-    errs
-end
-
 @testset "tiny checkpoint, float32" begin
     dir = R.tiny_checkpoint(joinpath(mktempdir(), "checkpoint"))
     ref = R.load(dir; dtype="float32", device="gpu")

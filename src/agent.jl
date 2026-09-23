@@ -101,14 +101,15 @@ escape_path(path::AbstractString) = join(map(p -> replace(p, r"[^\w.~-]" => c ->
     Agent
 
 A loaded Laya checkpoint: tokenizer, model and calibration. Create with [`load`](@ref).
+`model` is whatever the backend loaded (a [`DecisionModel`](@ref) on the CPU).
 """
-struct Agent{T}
+struct Agent{M}
     model_id::String
     model_dir::String
     cfg::Dict{String,Any}
     encoder_cfg::EncoderConfig
     tok::Tokenizer
-    model::DecisionModel{T}
+    model::M
     batch_size::Int
     temperature_raw::Vector{Float64}
     temperature_by_options_raw::Dict{String,Float64}
@@ -116,32 +117,22 @@ struct Agent{T}
     temperature_by_options::Dict{String,Float64}
 end
 
-const ACCELERATE_HINT_SHOWN = Ref(false)
-
-# On Apple silicon, BLAS through Accelerate runs the model's matrix products ~4-5x faster
-# than the bundled OpenBLAS. AppleAccelerate is an optional (weak) dependency: loading it
-# (`using AppleAccelerate`) forwards BLAS process-wide, so Laya only suggests it.
-function accelerate_hint()
-    (Sys.isapple() && Sys.ARCH === :aarch64 && !ACCELERATE_HINT_SHOWN[]) || return
-    ACCELERATE_HINT_SHOWN[] = true
-    any(lib -> occursin("Accelerate", lib.libname), LinearAlgebra.BLAS.get_config().loaded_libs) ||
-        @info "On Apple silicon, `using AppleAccelerate` makes Laya CPU inference ~3-5x faster."
-end
-
 """
-    load(model_id_or_path="convaiinnovations/laya"; dtype=Float32, batch_size=16, subfolder=nothing, revision=nothing)
+    load(model_id_or_path="convaiinnovations/laya"; dtype=Float32, batch_size=16, subfolder=nothing,
+         revision=nothing, backend=CPUBackend())
 
-Load a Laya checkpoint (local directory or Hugging Face repository, downloaded on first use; see\n[`resolve_model`](@ref)) for CPU inference.
+Load a Laya checkpoint (local directory or Hugging Face repository, downloaded on first use; see
+[`resolve_model`](@ref)). The tokenizer, prompts and calibration always run in Julia; the model
+forward runs on `backend` (see [`Backend`](@ref)).
 """
 function load(model_id_or_path::AbstractString="convaiinnovations/laya"; dtype::Type{T}=Float32,
-              batch_size::Integer=16, subfolder=nothing, revision=nothing) where {T}
+              batch_size::Integer=16, subfolder=nothing, revision=nothing, backend=CPUBackend()) where {T}
     batch_size >= 1 || throw(ArgumentError("batch_size must be a positive integer"))
-    accelerate_hint()
     dir = resolve_model(model_id_or_path; subfolder, revision)
     cfg = Dict{String,Any}(JSON.parsefile(joinpath(dir, "rl_agent_config.json")))
     (haskey(cfg, "encoder") && haskey(cfg, "head_layers")) ||
         throw(ArgumentError("Laya config must specify encoder and head_layers"))
-    model, enc_cfg, _ = load_model(dir; dtype=T)
+    enc_cfg = EncoderConfig(JSON.parsefile(joinpath(dir, "encoder", "config.json")))
     max_len, head_max_len = get(cfg, "max_len", 512), get(cfg, "head_max_len", 192)
     4 < head_max_len < max_len <= enc_cfg.max_position_embeddings ||
         throw(ArgumentError("Expected 4 < head_max_len < max_len <= max_position_embeddings"))
@@ -153,7 +144,8 @@ function load(model_id_or_path::AbstractString="convaiinnovations/laya"; dtype::
                 ["temperature[$(i-1)]=$(round(t; sigdigits=4))" for (i, t) in enumerate(traw) if clamp_temperature(t) != t]]
     isempty(rejected) || @warn "This checkpoint ships temperatures outside [$TEMP_MIN, $TEMP_MAX] which would distort " *
         "confidence; clamping $(join(rejected, ", ")). Treat confidence from the affected buckets as uncalibrated."
-    Agent{T}(String(model_id_or_path), dir, cfg, enc_cfg, Tokenizer(joinpath(dir, "tokenizer")), model, batch_size,
+    model = load_backend_model(backend, dir, T)
+    Agent(String(model_id_or_path), dir, cfg, enc_cfg, Tokenizer(joinpath(dir, "tokenizer")), model, batch_size,
         traw, braw, clamp_temperature.(traw), Dict(k => clamp_temperature(v) for (k, v) in braw))
 end
 

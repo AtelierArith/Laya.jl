@@ -1,6 +1,8 @@
-# Benchmark the pure-Julia Laya runtime (one checkpoint per process).
+# Benchmark the Julia Laya runtime (one checkpoint per process) on the CPU or, with
+# `--backend metal`, on the Apple GPU through Metal.jl.
 #
 #     julia --project=benchmark benchmark/bench_julia.jl --model aac6fef/laya-mlx --output results/x.json
+#     julia --project=benchmark benchmark/bench_julia.jl --backend metal --dtype float16 --output results/y.json
 #
 # Same workloads and timing boundaries as bench_python.py: wall clock, model loading
 # excluded. `prepare` is tokenization + prompt building; `forward` is one collated batch.
@@ -16,6 +18,10 @@ using Statistics
 if Sys.isapple() && !("--blas" in ARGS && ARGS[findfirst(==("--blas"), ARGS)+1] == "openblas")
     using AppleAccelerate
 end
+option(name, default) = (i = findfirst(==("--" * name), ARGS)) === nothing ? default : ARGS[i+1]
+if option("backend", "cpu") == "metal"
+    using Metal
+end
 
 const HERE = @__DIR__
 const EXAMPLES = joinpath(HERE, "..", "extern", "laya-mlx", "examples")
@@ -23,7 +29,7 @@ const EXAMPLES = joinpath(HERE, "..", "extern", "laya-mlx", "examples")
 function parse_args(args)
     opts = Dict{String,String}("model" => "aac6fef/laya-mlx", "dtype" => "float32", "batch-size" => "64",
                                "warmup" => "2", "iterations" => "10", "workloads" => "", "output" => "",
-                               "blas" => Sys.isapple() ? "accelerate" : "openblas")
+                               "blas" => Sys.isapple() ? "accelerate" : "openblas", "backend" => "cpu")
     i = 1
     while i <= length(args)
         key = replace(args[i], r"^--" => "")
@@ -65,9 +71,11 @@ function main(args)
     batch_size = parse(Int, opts["batch-size"])
     warmup, iterations = parse(Int, opts["warmup"]), parse(Int, opts["iterations"])
 
-    load_seconds = @elapsed agent = Laya.load(opts["model"]; dtype, batch_size)
+    backend = opts["backend"] == "metal" ? MetalBackend() :
+              opts["blas"] == "accelerate" ? AccelerateBackend() : CPUBackend()
+    load_seconds = @elapsed agent = Laya.load(opts["model"]; dtype, batch_size, backend)
     report = Dict{String,Any}(
-        "backend" => "julia-cpu-" * opts["blas"],
+        "backend" => opts["backend"] == "metal" ? "julia-metal-gpu" : "julia-cpu-" * opts["blas"],
         "created_at" => string(now(UTC)),
         "environment" => Dict(
             "julia" => string(VERSION),

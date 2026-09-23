@@ -5,7 +5,12 @@ authors = ["Satoshi Terasaki <terasakisatoshi.math@gmail.com>"]
 
 [deps]
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Laya = "b6f2eeaf-f276-4b2b-a62d-07adb813aeaf"
+
+[sources]
+Laya = {path = ".."}
 
 [compat]
 JSON = "1"
+Laya = "0.1"
 julia = "1.10"
