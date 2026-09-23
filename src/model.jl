@@ -113,7 +113,7 @@ function (layer::HeadLayer)(x::AbstractArray{T}, mask) where {T}
     # PyTorch TransformerEncoderLayer defaults to ReLU; the encoder and scorer use GELU.
     u = layer.linear1(h)
     release!(h)
-    r = relu.(u)
+    r = elementwise(relu, u)
     release!(u)
     y = residual(x1, layer.linear2(r))
     release!(x1, r)
@@ -162,7 +162,7 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     e = m.encoder(ids, mask; trace)
     trace === nothing || (trace["encoder"] = e)
     te = gather_columns(m.type_emb, qtype .+ 1)
-    h = e .+ reshape(te, :, 1, B)
+    h = add_columns(e, te)
     done!(e); release!(te)
     trace === nothing || (trace["typed"] = h)
     hmask = AttentionMask(on_device_of(h, reshape(mask, size(mask, 1), 1, B)), on_device_of(h, mask), nothing)
@@ -179,9 +179,10 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     markers = reshape(gather_columns(reshape(h, d, :), vec(columns)), d, K, B)
     s0 = m.scorer_norm(markers)
     s1 = m.scorer1(s0)
-    g1 = gelu.(s1)
+    g1 = elementwise(gelu, s1)
     s2 = m.scorer2(g1)
-    logits = to_host(Float32.(dropdims(s2; dims=1)))
+    h1 = columns_at(h, 1)                     # gathered before the first download, so that
+    logits = Float32.(dropdims(to_host(s2); dims=1))   # the second one finds the queue idle
     release!(markers, s0, s1, g1, s2)
     logits = ifelse.(marker_mask, logits, -1.0f4)
     p = softmax(logits; dims=1)
@@ -190,13 +191,13 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     # The public runtime pads to at least two marker slots for one-option choices.
     top = mapslices(c -> partialsort(c, 1:2; rev=true), p; dims=1)   # (2, B): best, second
     features = vcat(top[1:1, :], top[1:1, :] .- top[2:2, :], entropy, k ./ 255.0f0)
-    pooled = vcat(to_host(Float32.(h[:, 1, :])), features)
-    done!(h)
+    pooled = vcat(Float32.(to_host(h1)), features)
+    done!(h); release!(h1)
     pin = on_device_of(e, T.(pooled))
     a1 = m.act1(pin)
-    g2 = gelu.(a1)
+    g2 = elementwise(gelu, a1)
     a2 = m.act2(g2)
-    action = to_host(Float32.(a2))
+    action = Float32.(to_host(a2))
     release!(pin, a1, g2, a2)
     if trace !== nothing
         trace["logits"] = logits

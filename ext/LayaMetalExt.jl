@@ -128,6 +128,71 @@ function Laya.release_one!(x::MtlArray)
     Metal.unsafe_free!(x)
 end
 
+# ---------------------------------------------------------------------------- host <-> device
+
+# Host arrays (token ids, masks, indices, pooled features) go to the device through shared
+# buffers written with memcpy. Metal.jl's own upload synchronizes the whole queue and stages
+# through a fresh buffer every time. A shared buffer can only be rewritten by the host once
+# the GPU is done with it, so released upload buffers wait in `UPLOAD_PENDING` until a
+# download (which waits for the queue) or, past `UPLOAD_LIMIT`, an explicit wait moves them
+# back to `UPLOAD_FREE`.
+const UPLOAD_FREE = Dict{Tuple{UInt,DataType,Int},Vector{Metal.MTLBuffer}}()
+const UPLOAD_PENDING = Tuple{Tuple{UInt,DataType,Int},Metal.MTLBuffer}[]
+const UPLOAD_PENDING_BYTES = Ref(0)
+const UPLOAD_LIMIT = 64 << 20
+
+struct UploadReturn
+    key::Tuple{UInt,DataType,Int}
+end
+function (f::UploadReturn)(buf::Metal.MTLBuffer)
+    @lock POOL_LOCK begin
+        push!(UPLOAD_PENDING, (f.key, buf))
+        UPLOAD_PENDING_BYTES[] += f.key[3]
+    end
+    nothing
+end
+
+"""Move released upload buffers to the free list; call only once the GPU is idle."""
+function recycle_uploads!()
+    @lock POOL_LOCK begin
+        for (key, buf) in UPLOAD_PENDING
+            push!(get!(Vector{Metal.MTLBuffer}, UPLOAD_FREE, key), buf)
+        end
+        empty!(UPLOAD_PENDING)
+        UPLOAD_PENDING_BYTES[] = 0
+    end
+    nothing
+end
+
+function Laya.on_device_of(::MtlArray, x::AbstractArray{T,N}) where {T,N}
+    xa = convert(Array{T,N}, x)
+    bytes = cld(max(sizeof(xa), 1), POOL_PAGE) * POOL_PAGE
+    key = (queue_id(), T, bytes)
+    take() = @lock POOL_LOCK begin
+        free = get(UPLOAD_FREE, key, nothing)
+        free === nothing || isempty(free) ? nothing : pop!(free)
+    end
+    buf = take()
+    if buf === nothing && UPLOAD_PENDING_BYTES[] > UPLOAD_LIMIT
+        Metal.synchronize()
+        recycle_uploads!()
+        buf = take()
+    end
+    buf === nothing && (buf = Metal.alloc(Metal.device(), bytes; storage=Metal.SharedStorage))
+    GC.@preserve xa unsafe_copyto!(convert(Ptr{T}, Metal.MTL.contents(buf)), pointer(xa), length(xa))
+    ref = GPUArrays.DataRef(UploadReturn(key), buf)
+    y = MtlArray{T,N,Metal.SharedStorage}(ref, size(xa); maxsize=bytes)
+    GPUArrays.unsafe_free!(ref)     # `y` now holds the only reference
+    y
+end
+
+# A download waits for the queue, so every upload released so far can be reused.
+function Laya.to_host(x::MtlArray)
+    a = Array(x)
+    recycle_uploads!()
+    a
+end
+
 # ---------------------------------------------------------------------------- matrix products
 
 """
@@ -239,30 +304,38 @@ launch_reduce!(kernel, ncol::Integer, args...) =
     @metal threads=SIMD*REDUCE_COLS groups=cld(ncol, REDUCE_COLS) kernel(args..., Int32(ncol))
 
 # Statistics in Float32 as MLX's fast.layer_norm (also for Float16). With `r !== nothing` the
-# column is first replaced by the residual sum `x + r`, which is also written to `z`.
-function layernorm_kernel(y, z, x, r, w, b, d, eps, ncol)
+# column is first replaced by the residual sum `x + r`, which is also written to `z`. Each lane
+# keeps its `NV` elements of the column in registers, so the column is read once.
+function layernorm_kernel(y, z, x, r, w, b, d, eps, ::Val{NV}, ncol) where {NV}
     lane, col = lane_col()
     col <= ncol || return
     o = (col - Int32(1)) * d
-    s = 0.0f0
-    for i in lane:Int32(SIMD):d
-        if r === nothing
-            @inbounds s += Float32(x[o+i])
+    v = ntuple(Val(NV)) do k
+        i = lane + Int32(SIMD) * Int32(k - 1)
+        if i > d
+            0.0f0
+        elseif r === nothing
+            @inbounds Float32(x[o+i])
         else
-            @inbounds v = x[o+i] + r[o+i]
-            @inbounds z[o+i] = v
-            s += Float32(v)
+            @inbounds t = x[o+i] + r[o+i]
+            @inbounds z[o+i] = t
+            Float32(t)
         end
     end
+    s = 0.0f0
+    for k in 1:NV
+        s += v[k]
+    end
     μ = simd_reduce(+, s) / d
-    src = r === nothing ? x : z
     q = 0.0f0
-    for i in lane:Int32(SIMD):d
-        @inbounds q += abs2(Float32(src[o+i]) - μ)
+    for k in 1:NV
+        lane + Int32(SIMD) * Int32(k - 1) <= d && (q += abs2(v[k] - μ))
     end
     inv_σ = 1.0f0 / sqrt(simd_reduce(+, q) / d + eps)
-    for i in lane:Int32(SIMD):d
-        @inbounds t = (Float32(src[o+i]) - μ) * inv_σ * Float32(w[i])
+    for k in 1:NV
+        i = lane + Int32(SIMD) * Int32(k - 1)
+        i <= d || continue
+        @inbounds t = (v[k] - μ) * inv_σ * Float32(w[i])
         b === nothing || (@inbounds t += Float32(b[i]))
         @inbounds y[o+i] = t
     end
@@ -271,7 +344,7 @@ end
 
 function launch_layernorm!(y, z, x, r, ln::LayerNorm)
     d = size(x, 1)
-    launch_reduce!(layernorm_kernel, length(x) ÷ d, y, z, x, r, ln.weight, ln.bias, Int32(d), ln.eps)
+    launch_reduce!(layernorm_kernel, length(x) ÷ d, y, z, x, r, ln.weight, ln.bias, Int32(d), ln.eps, Val(cld(d, SIMD)))
 end
 
 function (ln::LayerNorm)(x::MtlArray{T}) where {T}
@@ -335,6 +408,77 @@ function Laya.gelu_gate(y::MtlArray{T}) where {T}
     out = pooled(T, (n, size(y)[2:end]...))
     launch!(gelu_gate_kernel, (n, length(out) ÷ n), out, y, n, length(out) ÷ n)
     out
+end
+
+# One kernel per activation, on a 2-D grid `(n, 1)`: in this module, a kernel taking the
+# function as an argument or reading `thread_position_in_grid_1d` crashed LLVM's inliner
+# (see docs/agents/workarounds.md).
+function relu_kernel(y, x, n)
+    i, _ = grid2()
+    i <= n && (@inbounds y[i] = Laya.relu(x[i]))
+    return
+end
+function gelu_kernel(y, x, n)
+    i, _ = grid2()
+    i <= n && (@inbounds y[i] = Laya.gelu(x[i]))
+    return
+end
+
+for (f, kernel) in ((:(Laya.relu), :relu_kernel), (:(Laya.gelu), :gelu_kernel))
+    @eval function Laya.elementwise(::typeof($f), x::MtlArray{T}) where {T}
+        y = pooled(T, size(x))
+        launch!($kernel, (length(x), 1), y, x, length(x))
+        y
+    end
+end
+
+function add_kernel(z, x, y, n)
+    i, _ = grid2()
+    i <= n && (@inbounds z[i] = x[i] + y[i])
+    return
+end
+
+function Laya.residual(x::MtlArray{T}, y::MtlArray{T}) where {T}
+    z = pooled(T, size(x))
+    launch!(add_kernel, (length(x), 1), z, x, y, length(x))
+    Laya.release!(y)
+    z
+end
+
+function add_columns_kernel(z, x, v, d, L, B)
+    i, l, b = grid3()
+    (i <= d && l <= L) && (@inbounds z[i+d*((l-Int32(1))+L*(b-Int32(1)))] = x[i+d*((l-Int32(1))+L*(b-Int32(1)))] + v[i+d*(b-Int32(1))])
+    return
+end
+
+function Laya.add_columns(x::MtlArray{T,3}, v::MtlMatrix{T}) where {T}
+    d, L, B = size(x)
+    z = pooled(T, size(x))
+    launch!(add_columns_kernel, (d, L, B), z, x, v, d, L, B)
+    z
+end
+
+# y `(d, n)` = E[:, idx] for device indices `idx` (1-based); also `columns_at` with a stride.
+function gather_kernel(y, E, idx, d, n, j, L)
+    i, k = grid2()
+    (i <= d && k <= n) && (@inbounds y[i+d*(k-Int32(1))] = E[i+d*((idx === nothing ? j - Int32(1) + L * (k - Int32(1)) : idx[k] - Int32(1)))])
+    return
+end
+
+function Laya.gather_columns(E::MtlMatrix{T}, idx::AbstractVector{<:Integer}) where {T}
+    d, n = size(E, 1), length(idx)
+    di = Laya.on_device_of(E, Int32.(idx))
+    y = pooled(T, (d, n))
+    launch!(gather_kernel, (d, n), y, E, di, d, n, 0, 0)
+    Laya.release!(di)
+    y
+end
+
+function Laya.columns_at(h::MtlArray{T,3}, j::Integer) where {T}
+    d, L, B = size(h)
+    y = pooled(T, (d, B))
+    launch!(gather_kernel, (d, B), y, h, nothing, d, B, j, L)
+    y
 end
 
 # ---------------------------------------------------------------------------- attention
