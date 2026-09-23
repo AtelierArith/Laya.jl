@@ -7,7 +7,8 @@
 A local checkpoint directory, or a Hugging Face repository. A repository is looked up in the
 Hugging Face cache (`HF_HUB_CACHE`, `HF_HOME/hub` or `~/.cache/huggingface/hub`, shared with
 Python), then in Laya's scratch space, and otherwise downloaded into the scratch space
-(disabled when `HF_HUB_OFFLINE` is set). `HF_TOKEN` is sent for private repositories.
+(disabled when `HF_HUB_OFFLINE` is set); only the checkpoint files are fetched (see
+[`hub_download`](@ref)). `HF_TOKEN` is sent for private repositories.
 """
 function resolve_model(model_id_or_path::AbstractString; subfolder=nothing, revision=nothing)
     if subfolder !== nothing
@@ -19,7 +20,7 @@ function resolve_model(model_id_or_path::AbstractString; subfolder=nothing, revi
     if !isdir(path)
         startswith(model_id_or_path, r"/|\./|\.\./|~") &&
             throw(ArgumentError("Local model directory does not exist: $model_id_or_path"))
-        path = hub_snapshot(model_id_or_path, something(revision, "main"))
+        path = hub_snapshot(model_id_or_path, something(revision, "main"), subfolder)
     end
     subfolder === nothing || (path = joinpath(path, subfolder))
     for name in ("model.safetensors", "rl_agent_config.json", joinpath("encoder", "config.json"))
@@ -45,49 +46,70 @@ function cached_snapshot(cache::AbstractString, repo::AbstractString, revision::
     isdir(dir) ? dir : nothing
 end
 
-function hub_snapshot(repo::AbstractString, revision::AbstractString)
+# The files of a checkpoint, as upstream's `snapshot_download(allow_patterns=...)`: a
+# repository may hold several checkpoints in subfolders, plus images and code.
+const CHECKPOINT_FILES = ("model.safetensors", "rl_agent_config.json", "encoder/config.json", "mlx_config.json")
+const REQUIRED_FILES = CHECKPOINT_FILES[1:3]
+
+subfolder_prefix(subfolder) = subfolder === nothing ? "" : rstrip(subfolder, '/') * "/"
+
+function checkpoint_file(file::AbstractString, prefix::AbstractString)
+    startswith(file, prefix) || return false
+    rest = file[ncodeunits(prefix)+1:end]
+    rest in CHECKPOINT_FILES || startswith(rest, "tokenizer/")
+end
+
+has_checkpoint(dir) = all(name -> isfile(joinpath(dir, name)), REQUIRED_FILES)
+
+function hub_snapshot(repo::AbstractString, revision::AbstractString, subfolder=nothing)
+    prefix = subfolder_prefix(subfolder)
     for cache in (hub_cache(), scratch_hub())
         dir = cached_snapshot(cache, repo, revision)
-        dir === nothing || return dir
+        dir === nothing || !has_checkpoint(joinpath(dir, prefix)) || return dir
     end
     offline = lowercase(get(ENV, "HF_HUB_OFFLINE", "0")) in ("1", "true", "yes", "on")
     offline && throw(ArgumentError("$repo@$revision is not cached and HF_HUB_OFFLINE is set"))
-    hub_download(repo, revision)
+    hub_download(repo, revision; subfolder)
 end
 
 hub_endpoint() = rstrip(get(ENV, "HF_ENDPOINT", "https://huggingface.co"), '/')
 hub_headers() = haskey(ENV, "HF_TOKEN") ? ["Authorization" => "Bearer $(ENV["HF_TOKEN"])"] : Pair{String,String}[]
 
 """
-    hub_download(repo, revision="main") -> String
+    hub_download(repo, revision="main"; subfolder=nothing) -> String
 
-Download every file of the Hugging Face model repository `repo` at `revision` into Laya's
-scratch space and return the snapshot directory. The snapshot appears only once complete.
+Download the checkpoint files of the Hugging Face model repository `repo` at `revision`
+(`model.safetensors`, `rl_agent_config.json`, `encoder/config.json`, `mlx_config.json` and
+`tokenizer/`, inside `subfolder` if given) into Laya's scratch space and return the snapshot
+directory. Other files, such as further checkpoints in other subfolders, are skipped. Each
+file appears in the snapshot only once completely downloaded; files already there are kept.
 """
-function hub_download(repo::AbstractString, revision::AbstractString="main")
+function hub_download(repo::AbstractString, revision::AbstractString="main"; subfolder=nothing)
     occursin(r"^[\w.-]+/[\w.-]+$", repo) || throw(ArgumentError("Invalid Hugging Face repository id: $repo"))
     headers = hub_headers()
     info = JSON.parse(String(take!(Downloads.download(
         "$(hub_endpoint())/api/models/$repo/revision/$(escape_path(revision))", IOBuffer(); headers))))
     commit = String(info["sha"])
-    files = String[s["rfilename"] for s in info["siblings"]]
+    prefix = subfolder_prefix(subfolder)
+    files = String[s["rfilename"] for s in info["siblings"] if checkpoint_file(s["rfilename"], prefix)]
+    isempty(files) && throw(ArgumentError("$repo@$revision has no Laya checkpoint files" *
+                                          (isempty(prefix) ? "" : " in $(repr(subfolder))")))
     root = joinpath(scratch_hub(), "models--" * replace(repo, "/" => "--"))
     dir = joinpath(root, "snapshots", commit)
-    if !isdir(dir)
-        tmp = mktempdir(mkpath(root); prefix="download-")
-        try
-            for file in files
-                any(==(".."), splitpath(file)) && throw(ArgumentError("Unsafe file name in $repo: $file"))
-                dest = joinpath(tmp, file)
-                mkpath(dirname(dest))
-                @info "Downloading $repo/$file"
-                Downloads.download("$(hub_endpoint())/$repo/resolve/$commit/$(escape_path(file))", dest; headers)
-            end
-            mkpath(dirname(dir))
-            mv(tmp, dir)
-        finally
-            ispath(tmp) && rm(tmp; recursive=true, force=true)
+    tmp = mktempdir(mkpath(root); prefix="download-")
+    try
+        for file in files
+            any(==(".."), splitpath(file)) && throw(ArgumentError("Unsafe file name in $repo: $file"))
+            isfile(joinpath(dir, file)) && continue
+            dest = joinpath(tmp, file)
+            mkpath(dirname(dest))
+            @info "Downloading $repo/$file"
+            Downloads.download("$(hub_endpoint())/$repo/resolve/$commit/$(escape_path(file))", dest; headers)
+            mkpath(dirname(joinpath(dir, file)))
+            mv(dest, joinpath(dir, file))
         end
+    finally
+        rm(tmp; recursive=true, force=true)
     end
     ref = joinpath(root, "refs", revision)
     mkpath(dirname(ref))

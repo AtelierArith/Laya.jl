@@ -41,3 +41,15 @@ end
     @test_throws ArgumentError Laya.load(dir; backend=:nonexistent)
     @test_throws ArgumentError predict(Laya.load(dir), "x", Dict("q" => Dict("type" => "bogus", "instructions" => "?")))
 end
+
+@testset "smoke: Hub download filter" begin
+    listing = ["README.md", "assets/logo.png", "model.safetensors", "rl_agent_config.json", "encoder/config.json",
+               "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json", "multilingual/model.safetensors",
+               "multilingual/rl_agent_config.json", "multilingual/encoder/config.json", "multilingual/tokenizer/tokenizer.json"]
+    @test filter(f -> Laya.checkpoint_file(f, Laya.subfolder_prefix(nothing)), listing) ==
+          ["model.safetensors", "rl_agent_config.json", "encoder/config.json", "tokenizer/tokenizer.json", "tokenizer/tokenizer_config.json"]
+    @test filter(f -> Laya.checkpoint_file(f, Laya.subfolder_prefix("multilingual")), listing) ==
+          ["multilingual/model.safetensors", "multilingual/rl_agent_config.json", "multilingual/encoder/config.json",
+           "multilingual/tokenizer/tokenizer.json"]
+    @test Laya.subfolder_prefix("multilingual/") == "multilingual/"
+end

@@ -79,17 +79,25 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 
 | repository | encoder | parameters |
 |---|---|---:|
-| [`aac6fef/laya-mlx`](https://huggingface.co/aac6fef/laya-mlx) | ModernBERT-large | 421M |
+| [`convaiinnovations/laya`](https://huggingface.co/convaiinnovations/laya) (the default of `load()`) | ModernBERT-large | 421M |
+| [`aac6fef/laya-mlx`](https://huggingface.co/aac6fef/laya-mlx) (MLX conversion of the above) | ModernBERT-large | 421M |
 | [`aac6fef/laya-multilingual-mlx`](https://huggingface.co/aac6fef/laya-multilingual-mlx) | mmBERT-base | 322M |
 
-These are the ones tested. `Laya.load` accepts either of the following:
+- **Original checkpoints**: the upstream repository `convaiinnovations/laya` also holds the
+  multilingual and typed-decisions checkpoints in subfolders:
+  `Laya.load("convaiinnovations/laya"; subfolder="multilingual")`.
+- **Downloads**: only the files of the requested checkpoint are downloaded, as upstream does.
+- **Tested**: the original and the MLX-converted English checkpoints give the same answers.
+  The MLX-converted checkpoints are the ones compared against the Python reference.
+
+`Laya.load` accepts either of the following:
 
 - **A local directory**: it must contain `model.safetensors`, `rl_agent_config.json`,
   `encoder/config.json` and `tokenizer/`.
 - **A Hugging Face repository id**: Laya looks in this order:
   1. the Hugging Face cache (`HF_HUB_CACHE`, `HF_HOME/hub` or `~/.cache/huggingface/hub`),
   2. Laya's Scratch.jl space,
-  3. otherwise it downloads the repository into that scratch space.
+  3. otherwise it downloads the checkpoint's files into that scratch space.
 
   Downloading respects `HF_HUB_OFFLINE`, `HF_TOKEN` and `HF_ENDPOINT`.
 
