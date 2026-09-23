@@ -163,3 +163,79 @@ scripts wait for the load to drop and cool the GPU down between backends.
 Timings of a 20-100 µs kernel varied 2-3x between runs depending on the GPU's performance
 state (an idle GPU clocks down; a run after heavy matmuls clocks up). Compare variants inside
 a full forward pass, or after a warm-up that keeps the GPU busy.
+
+## 11. Every host-to-device copy waits for the whole queue
+
+`copyto!(::MtlArray, ::Array)` (so `MtlArray(x)`, `on_device_of`, `similar` + `copyto!`)
+calls `Metal.synchronize()` first and then stages the data through a freshly allocated
+shared buffer and a blit. Each upload therefore drains the GPU queue: a 93-element index
+vector took 170 µs, a `(93, 93)` mask 460 µs, a `(512, 512, 10)` mask 2 ms, and a forward
+pass did nine of them. `LayaMetalExt` uploads with a `memcpy` into pooled shared buffers
+instead (`Laya.on_device_of(::MtlArray, x)`), which are reused only after a download has
+waited for the queue (`Laya.to_host`), or after an explicit wait once 64 MB are pending.
+
+```julia
+using Metal
+x = rand(Int32, 93)
+@time MtlArray(x)            # ~170 µs, and the GPU queue is empty afterwards
+```
+
+## 12. `simdgroup_barrier` does not order a `simdgroup_store` before lane reads
+
+In the attention kernel, a `simdgroup_store` of the O accumulator into this simdgroup's own
+columns of threadgroup memory, followed by `simdgroup_barrier(MemoryFlagThreadGroup)`, then
+per-lane reads and writes of those columns, then `simdgroup_load`, gave wrong results
+(relative error 0.1-0.6, varying from run to run) although only the one simdgroup touches
+that memory. The same sequence with `threadgroup_barrier` is correct. A small kernel that
+does nothing else passes either way (and even without a barrier), so the failure needs the
+surrounding load. Use `threadgroup_barrier` around simdgroup matrix stores and loads.
+
+## 13. Kernels on a 1-D grid crash LLVM's inliner when defined in the extension
+
+`function relu_kernel(y, x, n); i = Int32(thread_position_in_grid_1d()); i <= n && (@inbounds
+y[i] = Laya.relu(x[i])); return; end` defined in `LayaMetalExt` crashes the GPU compilation
+(`CallAnalyzer::analyze` in `libLLVM.dylib`, signal 11 or 10) at the first launch, also when
+the body is `ifelse(v > 0, v, 0)` or `Laya.gelu(x[i])`, and also for a kernel that takes the
+function as an argument. The same kernel in a module of a script compiles and runs. The
+extension's other kernels, which read `thread_position_in_grid_2d/3d`, are fine, so the
+elementwise kernels use a 2-D grid `(n, 1)`. Not reduced further (see also item 7).
+
+## 14. `exp` is 1.7x slower than Metal's fast exp
+
+Metal.jl lowers `exp(::Float32)` to `air.exp.f32`. `air.fast_exp.f32` (relative error about
+1e-6, `fast_exp(-Inf) == 0`, `fast_exp(-88) == 0`, `fast_exp(NaN)` is NaN) runs 1.7x faster;
+the fused attention kernel spends a sixth of its time in exp, so the softmax kernels call it
+through `ccall("extern air.fast_exp.f32", llvmcall, Float32, (Float32,), x)`. MLX compiles
+its kernels with fast math throughout.
+
+## 15. MPSGraph matmuls commit a command buffer per call
+
+`Metal.MPSGraphs.graph_matmul!` (behind `mul!` and `*`) creates and commits an
+`MPSCommandBuffer` of its own for every product, and because a command buffer derived from
+the queue flushes Metal.jl's kernel batch, a forward pass with 112 products ran in about 170
+command buffers. `LayaMetalExt.graph_matmul_batched!` encodes the same cached graph into the
+batched queue's open command buffer (`MPSCommandBuffer(Metal.ensure_cmdbuf!(bq))` after
+`Metal.end_encoder!(bq)`, then `record_operation!`/`maybe_autoflush!`), which cut a
+single-question forward pass from 23 to 21 ms. It uses Metal.jl internals
+(`MatmulGraphKey`, `CachedMatmulGraph`, `_matmul_graph_cache`), pinned by the `[compat]`
+bound on Metal.
+
+## 16. Occupancy: registers and threadgroup memory
+
+`pipeline.maxTotalThreadsPerThreadgroup` of a compiled kernel (`@metal launch=false`) tells
+how many threads the register use allows per core: 512 for the attention kernel, and
+variants that held a few more values (P fragments across a barrier, a diagonal rescale
+matrix, `valid`/`window` mask logic) dropped to 448 or 384 and ran 25-35% slower at L=512,
+B=10 although they did less work per tile. Threadgroup memory limits the same way (32 KB per
+core: 12 KB allows 2 threadgroups, 20 KB one). Check both before judging a kernel change.
+
+## 17. Reading and writing simdgroup matrix elements
+
+Lane `l` (0-based) of a simdgroup holds elements `(r, c)` and `(r, c + 1)` of every 8x8
+fragment in slots 1 and 2 of the `NTuple{64, VecElement}` (`m[1].value`, `m[2].value`), with
+`r = ((l >> 1) & 3) + 4 ((l >> 4) & 1)` and `c = 2 (l & 1) + 4 ((l >> 3) & 1)` (1-based rows
+and columns after `+ 1`); the other slots repeat them. Writing a fragment as
+`ntuple(i -> i == 1 ? VecElement(a) : i == 2 ? VecElement(b) : m[i], Val(64))` and storing
+it works (the layout MLX's `thread_elements()` relies on). A row reduction of a column is a
+shuffle-xor over lane bits 1, 2 and 4. An attention kernel that ran the whole softmax on
+fragments this way was correct but slower than the shipped one (item 16).
