@@ -53,6 +53,27 @@ if get(ENV, "LAYA_TEST_METAL", "0") == "1"
         end
     end
 
+    # The fused kernel reads `valid` and `window` of an AttentionMask to skip key tiles outside
+    # the local window; padded queries (left, right, holes) must still see every valid key.
+    @testset "Metal: attention with AttentionMask, $T" for T in (Float32, Float16)
+        tol = T == Float32 ? 1e-5 : 2e-2
+        H = 16
+        for (L, B) in ((93, 4), (200, 4), (300, 4), (512, 2)), window in (128, 16)
+            qkv = randn(T, 3 * 64H, L, B)
+            valid = trues(L, B)
+            valid[L÷2+1:end, 2] .= false                                  # right padding
+            B > 2 && (valid[[3, 10, L], 3] .= false)                      # holes
+            B > 3 && (valid[1:40, 4] .= false)                            # left padding
+            dense = Laya.attention_masks(valid, window)
+            for (mask, w) in ((dense.full, nothing), (dense.sliding, window ÷ 2))
+                ref = Laya.qkv_attention(qkv, H, 10000.0, Laya.AttentionMask(mask, valid, w), T(0.125))
+                out = Laya.qkv_attention(MtlArray(qkv), H, 10000.0, Laya.AttentionMask(MtlArray(mask), MtlArray(valid), w), T(0.125))
+                err = maxerr(Array(out)[:, valid], ref[:, valid]) / maximum(abs, Float32.(ref[:, valid]))
+                @test err < tol
+            end
+        end
+    end
+
     @testset "Metal: attention ignores garbage in pooled buffers" begin
         E = Base.get_extension(Laya, :LayaMetalExt)
         for H in (16, 4)                                # the fused and the unfused path
