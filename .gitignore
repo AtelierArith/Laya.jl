@@ -4,6 +4,6 @@ LocalPreferences.toml
 .CondaPkg/
 __pycache__/
 
-# External checkouts and native builds (see LayaMLX/README.md)
+# Reference checkout (laya-mlx) and the mlx-c install prefix (see LayaMLX/README.md)
 /extern/
-/deps/
+/deps/usr/

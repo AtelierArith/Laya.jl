@@ -8,9 +8,10 @@ fit together.
 
 ## Setup
 
-- mlx-c (HEAD ebc88f1, matching MLX v0.32.2) is prebuilt at `../deps/usr/lib/libmlxc.dylib`.
-  It links through an absolute rpath to `libmlx.dylib` in
-  `extern/laya-mlx/.venv/lib/python3.12/site-packages/mlx/lib`, so that venv must exist.
+- mlx-c is the submodule `../deps/mlx-c`, pinned at `ebc88f1` (the `main` commit that supports
+  MLX v0.32.2; no release does yet). `../deps/build.sh` builds it into `../deps/usr` against the
+  MLX of the `extern/laya-mlx` venv. `libmlxc.dylib` finds `libmlx.dylib` through an absolute
+  rpath into that venv, so the venv must exist. See `../SETUP.md` for all steps.
 - To use another build, set `LAYAMLX_LIBMLXC=/path/to/libmlxc.dylib` before loading the package.
 - `julia --project=LayaMLX -e 'using Pkg; Pkg.instantiate()'`
 

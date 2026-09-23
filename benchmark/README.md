@@ -25,9 +25,12 @@ ITERATIONS=5 WARMUP=1 WORKLOADS=short:1,short:10 benchmark/run.sh
 benchmark/run.sh aac6fef/laya-mlx aac6fef/laya-multilingual-mlx
 ```
 
-Requirements: the reference environment (`cd extern/laya-mlx && uv sync`) and the
-checkpoints in the Hugging Face cache (`hf download aac6fef/laya-mlx`); `run.sh` sets
-`HF_HUB_OFFLINE=1`.
+Requirements: `extern/laya-mlx` with its venv, `deps/usr` (for `mlxc`) and the checkpoints
+in the Hugging Face cache (see `../SETUP.md`); `run.sh` sets `HF_HUB_OFFLINE=1`.
+
+GPU timings depend on the machine's thermal state. A backend that runs right after another
+one can be up to 2× slower. Compare GPU backends from a cool machine, or run them again in
+the reverse order.
 
 Individual runs and the summary:
 

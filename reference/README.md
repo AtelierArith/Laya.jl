@@ -10,7 +10,8 @@ cd ../extern/laya-mlx && uv sync --extra dev --extra reference
 ```
 
 `LocalPreferences.toml` (and `test/LocalPreferences.toml`) point PythonCall's `exe` at
-`../extern/laya-mlx/.venv/bin/python`; this is machine-specific and bypasses CondaPkg.
+`../extern/laya-mlx/.venv/bin/python`. They are machine-specific and gitignored, and they
+bypass CondaPkg. `../SETUP.md` shows how to create them.
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'
