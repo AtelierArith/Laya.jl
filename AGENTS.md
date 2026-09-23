@@ -48,6 +48,7 @@ is, and `SETUP.md` covers the development setup.
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'                          # Laya (needs extern/ + LocalPreferences)
 LAYA_TEST_BLAS=accelerate julia --project=. -e 'using Pkg; Pkg.test()' # same, with Accelerate BLAS
+LAYA_TEST_GROUPS=aqua julia --project=. -e 'using Pkg; Pkg.test()'  # Aqua.jl code-quality checks only
 LAYA_TEST_METAL=1 LAYA_TEST_GROUPS=backends \
     julia --project=. -e 'using Pkg; Pkg.test()'                      # Metal backend vs reference
 julia --project=LayaMLX/test LayaMLX/test/runtests.jl                  # LayaMLX ops + tiny checkpoint
@@ -73,6 +74,8 @@ accident.
 - **mlx-c version**: `deps/mlx-c` is pinned at `ebc88f1`, which supports MLX v0.32.2. It must
   match the MLX in the `extern/laya-mlx` venv that `libmlxc.dylib` links against. If you move
   it, rebuild, regenerate the bindings and rerun the LayaMLX tests (they expect 0.0 error).
+- **Aqua.jl**: `Laya` and `LayaMLX` pass `Aqua.test_all` (ambiguities, piracy, compat bounds,
+  stale deps, …); keep it that way, e.g. give every new dependency a `[compat]` entry.
 - **Style**: match the surrounding code. Keep comments short and only where they explain why,
   and keep docstrings on the public API.
 

@@ -1,3 +1,4 @@
+using Aqua
 using LayaMLX
 using LayaMLX: MX
 using LayaMLX.MX: MLXArray, shape, astype
@@ -7,6 +8,10 @@ using Test
 
 const R = LayaMLXReference
 maxdiff(a, b) = maximum(abs.(Float64.(a) .- Float64.(b)))
+
+@testset "Aqua" begin
+    Aqua.test_all(LayaMLX)
+end
 
 # Julia-side reference implementations, written on Julia-layout arrays.
 jl_layernorm(x, w, b, eps) = (μ = sum(x; dims=1) / size(x, 1);

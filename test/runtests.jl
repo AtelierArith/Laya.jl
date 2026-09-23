@@ -27,9 +27,9 @@ end
 # one repository per process on memory-constrained machines.
 const TEST_REPOS = filter(!isempty, split(get(ENV, "LAYA_TEST_REPOS", "aac6fef/laya-mlx"), ","))
 
-# Test groups to run: LAYA_TEST_GROUPS=math,model,tokenizer,agent,backends (default: all).
+# Test groups to run: LAYA_TEST_GROUPS=aqua,math,model,tokenizer,agent,backends (default: all).
 # LAYA_TEST_METAL=1 adds the Metal.jl backend to "backends" (needs an Apple GPU).
-const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "math,model,tokenizer,agent,backends"), ",")
+const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "aqua,math,model,tokenizer,agent,backends"), ",")
 
 """Release checkpoints held by finished tests on both the Julia and the Python side."""
 function free_models()
