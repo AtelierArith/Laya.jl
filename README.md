@@ -124,18 +124,21 @@ asks N questions about a short state (93 tokens); `long:N` uses a state that fil
 | backend | short:1 | short:10 | short:50 | long:1 | long:10 |
 |---|---:|---:|---:|---:|---:|
 | Python laya-mlx (MLX GPU) | 17 ms | 94 ms | 410 ms | 55 ms | 481 ms |
-| `Laya` + `MetalBackend()` (GPU) | 23 ms | 97 ms | 402 ms | 66 ms | 501 ms |
+| `Laya` + `MetalBackend()` (GPU) | 17 ms | 89 ms | 386 ms | 56 ms | 475 ms |
 
 - **How the GPU rows were measured**: on an idle machine (load average below 4 for two
   minutes), cooled for 120 s, in the order Metal, Python, Python, Metal with 60 s pauses in
   between, each in its own process. The table shows each backend's faster run (10 iterations
   after 2 warmups). The script and raw results are in
-  `benchmark/results/gpu-fair-2026-09-23-m2max/`.
+  `benchmark/results/gpu-fair-2026-09-23-m2max-2/`; the first round on this machine, before
+  the matmuls were batched and the uploads pooled, is in `gpu-fair-2026-09-23-m2max/`
+  (Metal 23 / 97 / 402 / 66 / 501 ms).
 - **Answers**: both backends selected the same answers on every workload.
-- **Reading the results**: the Metal backend matches MLX from 10 questions upwards and is
-  6-10 ms behind for a single question, where the cost of enqueuing about 200 kernel and
-  matmul launches from Julia shows. Other CPU load distorts the Metal numbers far more than
-  the MLX ones (see `docs/agents/workarounds.md`).
+- **Reading the results**: the Metal backend is as fast as MLX for a single question and
+  4-6% faster from 10 questions upwards. The whole forward pass is a few command buffers
+  (matmuls and kernels batched together), uploads never wait for the GPU, and a warm forward
+  pass makes about a dozen small allocations. Other CPU load distorts the Metal numbers far
+  more than the MLX ones (see `docs/agents/workarounds.md`).
 - An earlier comparison on an Apple M4 (24 GiB), before the fused attention kernel and the
   buffer pool, is in `benchmark/results/gpu-fair-2026-09-23/`; there the Metal backend was
   1.1-2x slower than MLX. `LayaMLX` matched Python on that machine up to 50 short questions;
@@ -167,8 +170,9 @@ Not ported yet:
 
 Known gaps:
 
-- `MetalBackend` is 6-10 ms behind MLX for a single question (launch overhead of the
-  per-op kernels; MLX fuses more).
+- `MetalBackend`'s attention kernel is still about 3x slower than MLX's
+  `scaled_dot_product_attention` on 512-token inputs (hidden behind the matmuls in the
+  totals above); the softmax goes through threadgroup memory, MLX's stays in registers.
 
 ## Acknowledgements
 
