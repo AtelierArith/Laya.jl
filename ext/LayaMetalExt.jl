@@ -2,7 +2,7 @@ module LayaMetalExt
 
 using Laya: Laya, LayerNorm, Linear
 using Metal: Metal, MetalBackend, MtlArray, MtlMatrix, MtlThreadGroupArray, @metal, threadgroup_barrier,
-    simd_shuffle_xor, simd_ballot, simd_vote_any, thread_index_in_simdgroup, simdgroup_index_in_threadgroup,
+    simd_shuffle, simd_shuffle_xor, simd_ballot, simd_vote_any, thread_index_in_simdgroup, simdgroup_index_in_threadgroup,
     thread_position_in_threadgroup_1d, threadgroup_position_in_grid_1d, threadgroup_position_in_grid_3d,
     thread_position_in_grid_2d, thread_position_in_grid_3d,
     simdgroup_load, simdgroup_store, simdgroup_multiply_accumulate
@@ -538,44 +538,49 @@ function merge_heads_kernel(y, out, hd, H, L)
     return
 end
 
-function Laya.qkv_attention(qkv::MtlArray{T,3}, H::Integer, base, mask, scale::Real) where {T}
+function Laya.qkv_attention(qkv::MtlArray{T,3}, H::Integer, base, am, scale::Real) where {T}
     d, L, B = size(qkv, 1) ÷ 3, size(qkv, 2), size(qkv, 3)
-    mask = Laya.dense_mask(mask)      # the kernels read the dense mask; masked tiles are skipped by it
+    mask = Laya.dense_mask(am)        # the kernels read the dense mask; masked tiles are skipped by it
     d ÷ H == FA_HD || return attention_unfused(qkv, H, base, mask, scale)
     y = pooled(T, d, L, B)
     usemask = mask isa AbstractArray
     m = usemask ? mask : y
     Mq = usemask ? size(mask, 2) : 1
+    # local attention: tiles outside the window are not visited (`window < 0`: all tiles)
+    windowed = am isa Laya.AttentionMask && am.window !== nothing
+    valid, window = windowed ? (am.valid, Int32(am.window)) : (m, Int32(-1))
     c, s = base === nothing ? (qkv, qkv) : rope_tables(T, FA_HD, L, base)
-    @metal threads=FA_THREADS groups=(cld(L, FA_BQ), H, B) attention_kernel(y, qkv, c, s, m, Int32(H), Int32(L), Int32(Mq), usemask, base !== nothing, Float32(scale))
+    @metal threads=FA_THREADS groups=(cld(L, FA_BQ), H, B) attention_kernel(y, qkv, c, s, m, valid, window, Int32(H), Int32(L), Int32(Mq), usemask, base !== nothing, Float32(scale))
     y
 end
 
 # ---------------------------------------------------------------------------- fused attention
 
-# One kernel for the whole attention of a head_dim-64 model: a threadgroup of 4 simdgroups
-# takes 32 queries of one head and walks the keys in tiles of 32 with an online softmax.
+# One kernel for the whole attention of a head_dim-64 model: a threadgroup of 8 simdgroups
+# takes 64 queries of one head and walks the keys in tiles of 32 with an online softmax.
 # The Q tile is staged once and kept as simdgroup matrix fragments; each K tile is staged in
 # threadgroup memory (RoPE applied on the way in), S = KᵀQ and O += V P run on the 8x8
-# simdgroup matrix units, and the output goes out in the layout of the output projection.
-# Nothing but the output touches device memory: no S, P or head-permuted copies. A tile
-# whose mask is all false (outside the local window, padding) is skipped. Threadgroup memory
-# is kept to 12 KB (K, then the O rescale, then V share one buffer): with more, fewer
-# threadgroups fit on a GPU core and the barriers are no longer hidden (20 KB ran 1.7x
-# slower).
+# simdgroup matrix units, and the output goes out from registers in the layout of the output
+# projection. Nothing but the output touches device memory: no S, P or head-permuted copies.
+# A tile whose mask is all false (padding) is skipped, and under local attention the tiles
+# outside the window are not visited. Threadgroup memory is kept to 16 KB (K, then V share
+# one buffer): the matrix products are bound by threadgroup-memory loads, and 64 queries per
+# threadgroup halve those per query while still fitting two threadgroups on a core.
 const FA_HD = 64
-const FA_BQ = 32
+const FA_SG = 8
+const FA_BQ = 8FA_SG
 const FA_BK = 32
-const FA_THREADS = 128
+const FA_THREADS = 32FA_SG
 
 @inline zfrag() = Metal.simdgroup_matrix_init_filled(0.0f0)
 @inline barrier() = threadgroup_barrier(Metal.MemoryFlagThreadGroup)
 @inline qkv_offset(p, l, h, H, L, b) =
     Int32(FA_HD) * ((h - Int32(1)) + H * (p + Int32(3) * ((l - Int32(1)) + L * (b - Int32(1)))))
 
+# 32 rows of q or k (p = 0, 1) from `l0 + 1` into `tile` `(FA_HD, 32)`, RoPE and scale applied
 @inline function stage_rope!(tile, qkv, c, s, p, l0, L, h, H, b, userope, scale, t)
     half = Int32(FA_HD ÷ 2)
-    for idx in t:Int32(FA_THREADS):Int32(half * FA_BQ)
+    for idx in t:Int32(FA_THREADS):Int32(half * FA_BK)
         j = (idx - Int32(1)) & (half - Int32(1)) + Int32(1)
         ll = (idx - Int32(1)) >> Int32(5) + Int32(1)
         l = l0 + ll
@@ -618,8 +623,6 @@ end
 @inline mma_v(acc, Vt, kb, p) =
     ntuple(hb -> simdgroup_multiply_accumulate(simdgroup_load(Vt, (1 + 8(hb - 1), 1 + 8kb), Val(true)), p, acc[hb]), Val(8))
 @inline load_q(Qt, qo) = ntuple(hb -> simdgroup_load(Qt, (1 + 8(hb - 1), qo), Val(true)), Val(8))
-@inline store_o!(acc, buf, qo) = (ntuple(hb -> simdgroup_store(acc[hb], buf, (1 + 8(hb - 1), qo), Val(true)), Val(8)); nothing)
-@inline load_o(buf, qo) = ntuple(hb -> simdgroup_load(buf, (1 + 8(hb - 1), qo), Val(true)), Val(8))
 
 # S `(FA_BK, FA_BQ)` = Ktᵀ Q for this simdgroup's query block, with Q fragments `qf` in registers.
 @inline function s_tile!(St, Kt, qf, qo)
@@ -631,6 +634,15 @@ end
         simdgroup_store(acc[kb], St, (1 + 8(kb - 1), qo), Val(true))
     end
 end
+
+# Lane `λ` (0-based) of a simdgroup holds, in every O fragment, head-dim row `ri` of the
+# simdgroup's queries `cq` and `cq + 1` (`workarounds.md` item 17): the O rescale and the
+# output need no trip through threadgroup memory.
+@inline frag_query(λ) = Int32(2) * (λ & Int32(1)) + Int32(4) * ((λ >> Int32(3)) & Int32(1))
+@inline frag_row(λ) = ((λ >> Int32(1)) & Int32(3)) + Int32(4) * ((λ >> Int32(4)) & Int32(1))
+@inline scale_frag(f, a1, a2) = ntuple(i -> i == 1 ? VecElement(f[1].value * a1) : i == 2 ? VecElement(f[2].value * a2) : f[i], Val(64))
+# a per-query value from the 4 threads that own the query in the softmax (1-based lanes)
+@inline query_value(x, cq) = (simd_shuffle(x, Int16(4) * Int16(cq) + Int16(1)), simd_shuffle(x, Int16(4) * Int16(cq) + Int16(5)))
 
 @inline function key_bits(mask, usemask, k0, part, qi, L, Mq, b)
     bits = Int32(0)
@@ -647,19 +659,38 @@ end
 
 @inline function tile_kept(flags, bits, t, sg)
     sg_any = simd_vote_any(simd_ballot(bits != Int32(0)))
-    t <= Int32(4) && (@inbounds flags[t] = Int32(0))
+    t <= Int32(FA_SG) && (@inbounds flags[t] = Int32(0))
     barrier()
     sg_any && (@inbounds flags[sg] = Int32(1))
     barrier()
-    @inbounds (flags[1] | flags[2] | flags[3] | flags[4]) != Int32(0)
+    kept = Int32(0)
+    for i in 1:FA_SG
+        @inbounds kept |= flags[i]
+    end
+    kept != Int32(0)
 end
 
-# Single pass, online softmax. Threadgroup memory: `buf` (FA_HD, 32) for the Q staging, then
-# each K tile, the O rescale and each V tile in turn; `St` (FA_BK, FA_BQ) for S then P.
-function attention_kernel(y, qkv, c, s, mask, H, L, Mq, usemask, userope, scale)
+# Key tiles the queries `q0 + 1 : q0 + FA_BQ` can see under local attention of half-width
+# `window` (all tiles if `window < 0` or a query of the block is padding: padded queries keep
+# every valid key). Uniform over the threadgroup.
+@inline function tile_range(valid, window, q0, L, b, ntiles)
+    window < Int32(0) && return Int32(0), ntiles - Int32(1)
+    pad = false
+    for q in q0+Int32(thread_index_in_simdgroup()):Int32(32):min(q0 + Int32(FA_BQ), L)
+        pad |= (@inbounds valid[q+L*(b-Int32(1))]) == false
+    end
+    simd_ballot(pad) != 0 && return Int32(0), ntiles - Int32(1)
+    lo = max(q0 - window, Int32(0)) ÷ Int32(FA_BK)
+    hi = min((min(q0 + Int32(FA_BQ), L) - Int32(1) + window) ÷ Int32(FA_BK), ntiles - Int32(1))
+    lo, hi
+end
+
+# Single pass, online softmax. Threadgroup memory: `buf` (FA_HD, 32) for the Q staging (32
+# queries at a time), then each K tile and each V tile in turn; `St` (FA_BK, FA_BQ) for S then P.
+function attention_kernel(y, qkv, c, s, mask, valid, window, H, L, Mq, usemask, userope, scale)
     buf = MtlThreadGroupArray(Float32, (FA_HD, FA_BK))
     St = MtlThreadGroupArray(Float32, (FA_BK, FA_BQ))
-    flags = MtlThreadGroupArray(Int32, 4)
+    flags = MtlThreadGroupArray(Int32, FA_SG)
     g = threadgroup_position_in_grid_3d()
     q0 = (Int32(g.x) - Int32(1)) * Int32(FA_BQ)
     h, b = Int32(g.y), Int32(g.z)
@@ -671,16 +702,25 @@ function attention_kernel(y, qkv, c, s, mask, H, L, Mq, usemask, userope, scale)
     qi = q0 + col
     so = Int32(8) * part + Int32(FA_BK) * (col - Int32(1))
     ntiles = (L + Int32(FA_BK - 1)) ÷ Int32(FA_BK)
+    λ = Int32(thread_index_in_simdgroup()) - Int32(1)
+    cq = frag_query(λ)
 
+    # Q in two halves of 32 queries through `buf`
     stage_rope!(buf, qkv, c, s, Int32(0), q0, L, h, H, b, userope, scale, t)
     barrier()
-    qf = load_q(buf, qo)
+    qf = load_q(buf, 1 + 8 * ((Int(sg) - 1) & 3))
+    barrier()
+    stage_rope!(buf, qkv, c, s, Int32(0), q0 + Int32(32), L, h, H, b, userope, scale, t)
+    barrier()
+    qn = load_q(buf, 1 + 8 * ((Int(sg) - 1) & 3))
+    qf = sg > Int32(4) ? qn : qf
     barrier()
 
     m = -Inf32
     l = 0.0f0
     acc = (zfrag(), zfrag(), zfrag(), zfrag(), zfrag(), zfrag(), zfrag(), zfrag())
-    for tile in Int32(0):ntiles-Int32(1)
+    t0, t1 = tile_range(valid, window, q0, L, b, ntiles)
+    for tile in t0:t1
         k0 = tile * Int32(FA_BK)
         bits = key_bits(mask, usemask, k0, part, qi, L, Mq, b)
         tile_kept(flags, bits, t, sg) || continue
@@ -708,16 +748,9 @@ function attention_kernel(y, qkv, c, s, mask, H, L, Mq, usemask, userope, scale)
         p += simd_shuffle_xor(p, Int16(2))
         l = l * α + p
         m = mn
-        # rescale O by α (per query column) through buf, K is no longer needed
-        store_o!(acc, buf, qo)
-        barrier()
-        for i in part*Int32(16)+Int32(1):part*Int32(16)+Int32(16)
-            @inbounds buf[i+Int32(FA_HD)*(col-Int32(1))] *= α
-        end
-        barrier()
-        acc = load_o(buf, qo)
-        barrier()
-        stage_v!(buf, qkv, k0, L, h, H, b, t)
+        a1, a2 = query_value(α, cq)
+        acc = map(f -> scale_frag(f, a1, a2), acc)
+        stage_v!(buf, qkv, k0, L, h, H, b, t)       # K is no longer read: the barrier above
         barrier()
         for kb in 0:3
             pf = simdgroup_load(St, (1 + 8kb, qo), Val(true))
@@ -725,14 +758,13 @@ function attention_kernel(y, qkv, c, s, mask, H, L, Mq, usemask, userope, scale)
         end
         barrier()
     end
-    inv_l = l > 0.0f0 ? 1.0f0 / l : 0.0f0
-    store_o!(acc, buf, qo)
-    barrier()
-    for i in part*Int32(16)+Int32(1):part*Int32(16)+Int32(16)
-        lq = q0 + col
-        if lq <= L
-            @inbounds y[i+Int32(FA_HD)*((h-Int32(1))+H*((lq-Int32(1))+L*(b-Int32(1))))] = buf[i+Int32(FA_HD)*(col-Int32(1))] * inv_l
-        end
+    i1, i2 = query_value(l > 0.0f0 ? 1.0f0 / l : 0.0f0, cq)
+    lq = q0 + Int32(qo - 1) + cq + Int32(1)
+    ri = frag_row(λ)
+    for hb in 1:8
+        o = Int32(8(hb - 1)) + ri + Int32(1) + Int32(FA_HD) * ((h - Int32(1)) + H * ((lq - Int32(1)) + L * (b - Int32(1))))
+        lq <= L && (@inbounds y[o] = acc[hb][1].value * i1)
+        lq < L && (@inbounds y[o+Int32(FA_HD)*H] = acc[hb][2].value * i2)
     end
     return
 end
