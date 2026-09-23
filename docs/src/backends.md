@@ -44,7 +44,13 @@ extension `LayaMetalExt` specializes a few hot spots for `MtlArray`:
   the softmax runs in `Float32`;
 - LayerNorm with one simdgroup per column (statistics in `Float32`), fused with the preceding
   residual sum ([`Laya.residual_norm`](@ref)), including across layers; and GeGLU;
-- the linear layers through Metal.jl's cached MPSGraph matmuls;
+- the linear layers through Metal.jl's cached MPSGraph matmuls, encoded into the batched
+  command buffer of Metal.jl's queue together with the kernels, so a forward pass is a
+  handful of command buffers rather than one per product;
+- host arrays (token ids, masks, gather indices) uploaded with a `memcpy` into pooled shared
+  buffers, and the small steps of the decision head (gathers, residual adds, activations)
+  as kernels into pooled memory: a warm forward pass makes about a dozen small allocations
+  and waits for the GPU only at its two downloads;
 - a buffer pool: released intermediates ([`Laya.release!`](@ref)) keep their buffer for the
   next allocation of the same size, so a warm forward pass allocates no device memory. Julia's
   GC does not see GPU memory pressure, and Metal.jl passes kernel arguments by GPU address,

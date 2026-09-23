@@ -31,6 +31,14 @@ is, and `SETUP.md` covers the development setup.
     Metal.jl's cached MPSGraph `graph_matmul!`.
   - Metal.jl's simdgroup and lane indices are 1-based; `Base.reshape` may return its
     argument, so never `unsafe_free!` a "view" without checking `===`.
+  - Never upload with `MtlArray(x)` / `copyto!` in the forward pass: Metal.jl waits for the
+    whole queue on every host-to-device copy. Use `Laya.on_device_of` (pooled shared
+    buffers) and `Laya.to_host`, whose download recycles them.
+  - Use `threadgroup_barrier`, not `simdgroup_barrier`, around simdgroup matrix stores and
+    loads. Elementwise kernels use a 2-D grid: 1-D kernels defined in the extension crash
+    the GPU compiler.
+  - Judge a kernel variant by `pipeline.maxTotalThreadsPerThreadgroup` (register use) and
+    its threadgroup memory as well as by time: a few more live values cost 25-35%.
   - After touching the extension, run the `backends` test group **and** a determinism
     stress (50+ identical forwards of `short:1`, `short:10`, `short:3`, `long:1`, `long:10`
     compared bitwise): the failures above were all transient and invisible to a single
