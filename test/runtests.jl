@@ -1,6 +1,16 @@
 using Laya
-using LayaMLXReference
 using Test
+
+# Test groups to run: LAYA_TEST_GROUPS=aqua,smoke,math,model,tokenizer,agent,backends (default:
+# all). LAYA_TEST_METAL=1 adds the Metal.jl backend to "backends" (needs an Apple GPU).
+# "aqua" and "smoke" need neither Python nor checkpoints (what CI runs); the other groups
+# compare against the Python reference in extern/laya-mlx (see SETUP.md).
+const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "aqua,smoke,math,model,tokenizer,agent,backends"), ",")
+const NEEDS_REFERENCE = !isempty(setdiff(TEST_GROUPS, ["aqua", "smoke"]))
+if NEEDS_REFERENCE
+    using LayaMLXReference
+    const R = LayaMLXReference
+end
 
 # LAYA_TEST_BLAS=accelerate runs the suite with BLAS forwarded to Apple's Accelerate
 # (Laya's optional fast path on Apple silicon); the default is the bundled OpenBLAS.
@@ -9,8 +19,6 @@ if get(ENV, "LAYA_TEST_BLAS", "openblas") == "accelerate"
 end
 using LinearAlgebra: BLAS
 @info "BLAS: $(BLAS.get_config())"
-
-const R = LayaMLXReference
 
 maxerr(a, b) = maximum(abs.(Float32.(a) .- Float32.(b)))
 
@@ -26,10 +34,6 @@ end
 # reference). Select them with LAYA_TEST_REPOS (comma-separated, "" for none) and prefer
 # one repository per process on memory-constrained machines.
 const TEST_REPOS = filter(!isempty, split(get(ENV, "LAYA_TEST_REPOS", "aac6fef/laya-mlx"), ","))
-
-# Test groups to run: LAYA_TEST_GROUPS=aqua,math,model,tokenizer,agent,backends (default: all).
-# LAYA_TEST_METAL=1 adds the Metal.jl backend to "backends" (needs an Apple GPU).
-const TEST_GROUPS = split(get(ENV, "LAYA_TEST_GROUPS", "aqua,math,model,tokenizer,agent,backends"), ",")
 
 """Release checkpoints held by finished tests on both the Julia and the Python side."""
 function free_models()

@@ -48,7 +48,7 @@ is, and `SETUP.md` covers the development setup.
 ```bash
 julia --project=. -e 'using Pkg; Pkg.test()'                          # Laya (needs extern/ + LocalPreferences)
 LAYA_TEST_BLAS=accelerate julia --project=. -e 'using Pkg; Pkg.test()' # same, with Accelerate BLAS
-LAYA_TEST_GROUPS=aqua julia --project=. -e 'using Pkg; Pkg.test()'  # Aqua.jl code-quality checks only
+LAYA_TEST_GROUPS=aqua,smoke julia --project=. -e 'using Pkg; Pkg.test()' # what CI runs: no Python, no checkpoints
 LAYA_TEST_METAL=1 LAYA_TEST_GROUPS=backends \
     julia --project=. -e 'using Pkg; Pkg.test()'                      # Metal backend vs reference
 julia --project=LayaMLX/test LayaMLX/test/runtests.jl                  # LayaMLX ops + tiny checkpoint
@@ -59,10 +59,15 @@ benchmark/run.sh                                                       # see ben
 BACKENDS=metal DTYPE=float16 benchmark/run.sh                          # Metal only
 cd LayaMLX/gen && julia --project=. generator.jl                       # regenerate src/LibMLX.jl
 deps/build.sh                                                          # rebuild mlx-c into deps/usr
+julia --project=docs docs/make.jl                                      # Documenter.jl docs (docs/src)
 ```
 
 Set `HF_HUB_OFFLINE=1` when the checkpoints are already cached, so nothing is downloaded by
 accident.
+
+CI (`.github/workflows/CI.yml`) runs only the `aqua` and `smoke` groups on Linux, macOS and
+Windows. The comparisons against the Python reference (all other groups, Metal and LayaMLX)
+must be run locally before pushing changes to the model, tokenizer or prompts.
 
 ## Code conventions
 
