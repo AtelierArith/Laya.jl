@@ -1,0 +1,10 @@
+[deps]
+LayaMLX = "5b8e2f3a-6c1d-4e7f-9a2b-3d4c5e6f7a81"
+LayaMLXReference = "0f3c1a52-8a4e-4d7e-9b61-6c2e5a0d7b13"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+LayaMLX = {path = ".."}
+LayaMLXReference = {path = "../../reference"}

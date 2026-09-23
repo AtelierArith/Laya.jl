@@ -1,0 +1,20 @@
+name = "Laya"
+uuid = "b6f2eeaf-f276-4b2b-a62d-07adb813aeaf"
+version = "0.1.0"
+authors = ["Satoshi Terasaki <terasakisatoshi.math@gmail.com>"]
+
+[deps]
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Scratch = "6c6a2e73-6563-6170-7368-637461726353"
+
+[weakdeps]
+AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
+
+[compat]
+AppleAccelerate = "0.7.0"
+Downloads = "1"
+JSON = "1"
+Scratch = "1"
+julia = "1.10"

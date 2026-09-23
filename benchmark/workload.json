@@ -1,0 +1,6 @@
+{
+  "note": "Same workloads as extern/laya-mlx/benchmarks/common.py: examples/state.json and examples/questions.json; long adds a 200x repeated body; questions cycle through the definitions.",
+  "long_body": "The customer reports duplicate billing and requests a refund today. ",
+  "long_repeat": 200,
+  "default_workloads": ["short:1", "short:5", "short:10", "short:50", "long:1", "long:10"]
+}

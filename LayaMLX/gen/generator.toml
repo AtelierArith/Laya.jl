@@ -1,0 +1,13 @@
+[general]
+library_name = "libmlxc"
+output_file_path = "../src/LibMLX.jl"
+module_name = "LibMLX"
+jll_pkg_name = ""
+export_symbol_prefixes = []
+prologue_file_path = "./prologue.jl"
+use_julia_native_enum_type = true
+print_using_CEnum = false
+output_ignorelist = ["mlx_array_empty", "mlx_error"]
+
+[codegen]
+use_ccall_macro = false

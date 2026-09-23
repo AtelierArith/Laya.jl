@@ -1,0 +1,10 @@
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Laya = "b6f2eeaf-f276-4b2b-a62d-07adb813aeaf"
+LayaMLX = "5b8e2f3a-6c1d-4e7f-9a2b-3d4c5e6f7a81"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[sources]
+Laya = {path = "../.."}
+LayaMLX = {path = ".."}

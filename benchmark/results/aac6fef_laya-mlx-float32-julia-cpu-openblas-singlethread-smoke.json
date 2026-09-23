@@ -1,0 +1,123 @@
+{
+  "backend": "julia-cpu",
+  "batch_size": 64,
+  "created_at": "2026-09-23T01:07:47.605",
+  "dtype": "float32",
+  "environment": {
+    "blas": "LBTConfig([ILP64] libopenblas64_.0.3.30.dylib)",
+    "blas_threads": 4,
+    "cpu": "Apple M4",
+    "julia": "1.13.0",
+    "machine": "aarch64",
+    "threads": 1
+  },
+  "iterations": 3,
+  "load_seconds": 1.489203083,
+  "max_rss_bytes": 3416735744,
+  "model": "aac6fef/laya-mlx",
+  "results": [
+    {
+      "answers": {
+        "q0": "billing"
+      },
+      "e2e": {
+        "max_ms": 319.757,
+        "mean_ms": 317.96001366666667,
+        "min_ms": 316.820333,
+        "p50_ms": 317.302708,
+        "p95_ms": 319.5115708,
+        "questions_per_second": 3.1450495566035226,
+        "samples_ms": [
+          317.302708,
+          319.757,
+          316.820333
+        ]
+      },
+      "forward": {
+        "max_ms": 318.661166,
+        "mean_ms": 317.730805,
+        "min_ms": 316.372833,
+        "p50_ms": 318.158416,
+        "p95_ms": 318.61089100000004,
+        "samples_ms": [
+          316.372833,
+          318.158416,
+          318.661166
+        ]
+      },
+      "input_tokens": 93,
+      "prepare": {
+        "max_ms": 0.049583,
+        "mean_ms": 0.044847,
+        "min_ms": 0.041583,
+        "p50_ms": 0.043375,
+        "p95_ms": 0.0489622,
+        "samples_ms": [
+          0.049583,
+          0.043375,
+          0.041583
+        ]
+      },
+      "questions": 1,
+      "sequence_length": 93,
+      "workload": "short:1"
+    },
+    {
+      "answers": {
+        "q0": "billing",
+        "q1": 1.4476,
+        "q2": 0.8592,
+        "q3": "billing",
+        "q4": 1.4476,
+        "q5": 0.8592,
+        "q6": "billing",
+        "q7": 1.4476,
+        "q8": 0.8592,
+        "q9": "billing"
+      },
+      "e2e": {
+        "max_ms": 3138.548667,
+        "mean_ms": 3116.7783889999996,
+        "min_ms": 3083.317041,
+        "p50_ms": 3128.469459,
+        "p95_ms": 3137.5407462,
+        "questions_per_second": 3.2084411375838764,
+        "samples_ms": [
+          3083.317041,
+          3138.548667,
+          3128.469459
+        ]
+      },
+      "forward": {
+        "max_ms": 3023.31625,
+        "mean_ms": 2997.551930666667,
+        "min_ms": 2948.548875,
+        "p50_ms": 3020.790667,
+        "p95_ms": 3023.0636916999997,
+        "samples_ms": [
+          2948.548875,
+          3023.31625,
+          3020.790667
+        ]
+      },
+      "input_tokens": 855,
+      "prepare": {
+        "max_ms": 0.424542,
+        "mean_ms": 0.41026399999999996,
+        "min_ms": 0.397084,
+        "p50_ms": 0.409166,
+        "p95_ms": 0.42300439999999995,
+        "samples_ms": [
+          0.424542,
+          0.409166,
+          0.397084
+        ]
+      },
+      "questions": 10,
+      "sequence_length": 93,
+      "workload": "short:10"
+    }
+  ],
+  "timing": "wall clock; model loading excluded",
+  "warmup": 1
+}

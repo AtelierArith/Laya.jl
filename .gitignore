@@ -1,0 +1,9 @@
+# Julia environments and machine-specific settings
+Manifest.toml
+LocalPreferences.toml
+.CondaPkg/
+__pycache__/
+
+# External checkouts and native builds (see LayaMLX/README.md)
+/extern/
+/deps/
