@@ -23,5 +23,6 @@ include("tokenizer.jl")
 include("prompt.jl")
 include("backends.jl")
 include("agent.jl")
+include("precompile.jl")
 
 end # module Laya

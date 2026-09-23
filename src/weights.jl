@@ -39,6 +39,15 @@ layernorm(r, name, d; bias=true, eps=1e-5) =
 
 function DecisionModel{T}(cfg::EncoderConfig, agent_cfg::AbstractDict, weights::AbstractDict) where {T}
     r = WeightReader{T}(sanitize_weights(weights))
+    model = DecisionModel{T}(cfg, agent_cfg, r)
+    # Checkpoint buffer; calibration uses the JSON config instead.
+    haskey(r.weights, "temperature") && r("temperature", 3)
+    isempty(r.weights) || error("Unexpected checkpoint parameters: $(join(sort(collect(keys(r.weights))), ", "))")
+    model
+end
+
+# `r(name, dims...)` returns the `Array{T}` parameter `name` of Julia size `dims`.
+function DecisionModel{T}(cfg::EncoderConfig, agent_cfg::AbstractDict, r) where {T}
     d, I = cfg.hidden_size, cfg.intermediate_size
     nb = (bias=cfg.norm_bias, eps=cfg.norm_eps)
     layers = map(0:cfg.num_hidden_layers-1) do i
@@ -78,7 +87,7 @@ function DecisionModel{T}(cfg::EncoderConfig, agent_cfg::AbstractDict, weights::
         )
     end
     nact = length(get(agent_cfg, "act_costs", Dict())) + 1
-    model = DecisionModel{T}(
+    DecisionModel{T}(
         encoder,
         head,
         r("type_emb.weight", d, 3),
@@ -88,10 +97,6 @@ function DecisionModel{T}(cfg::EncoderConfig, agent_cfg::AbstractDict, weights::
         linear(r, "act_head.layers.0", d + 4, 256),
         linear(r, "act_head.layers.2", 256, nact),
     )
-    # Checkpoint buffer; calibration uses the JSON config instead.
-    haskey(r.weights, "temperature") && r("temperature", 3)
-    isempty(r.weights) || error("Unexpected checkpoint parameters: $(join(sort(collect(keys(r.weights))), ", "))")
-    model
 end
 
 """

@@ -6,7 +6,7 @@ is, and `SETUP.md` covers the development setup.
 ## Architecture rules
 
 - **`Laya` (`src/`) is pure Julia and OS-independent.**
-  - Hard dependencies are JSON, Scratch, Downloads and LinearAlgebra. Do not add Python,
+  - Hard dependencies are JSON, Scratch, Downloads, LinearAlgebra and PrecompileTools. Do not add Python,
     binary or platform-specific packages to `[deps]`.
   - Platform speedups are weak dependencies with package extensions in `ext/`, selected with
     `load(...; backend=...)` by dispatch on the backend type:
@@ -76,6 +76,9 @@ accident.
   it, rebuild, regenerate the bindings and rerun the LayaMLX tests (they expect 0.0 error).
 - **Aqua.jl**: `Laya` and `LayaMLX` pass `Aqua.test_all` (ambiguities, piracy, compat bounds,
   stale deps, …); keep it that way, e.g. give every new dependency a `[compat]` entry.
+- **Precompilation**: `src/precompile.jl` runs `load` and `predict` on a tiny random checkpoint
+  (byte-level and Metaspace BPE tokenizers) at precompile time. Extend it when adding code paths
+  that every user hits, and re-measure time to first `predict`.
 - **Style**: match the surrounding code. Keep comments short and only where they explain why,
   and keep docstrings on the public API.
 
