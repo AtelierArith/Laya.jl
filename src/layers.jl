@@ -96,6 +96,25 @@ function rope(x::AbstractArray{T,4}, base::Real) where {T}
 end
 
 """
+    AttentionMask(dense, valid, window)
+
+A key mask for self-attention. `dense` is the Bool mask `(L_k, L_q, B)` (or `(L_k, 1, B)`)
+that the generic code applies; `valid` `(L, B)` marks real (unpadded) tokens and `window` is
+the half-width of local attention (`nothing` for global attention). Together they describe
+`dense`: a valid query keeps the valid keys within `window` of it, a padded query keeps all
+valid keys. Kernels use the structure to skip masked blocks.
+"""
+struct AttentionMask{A<:AbstractArray{Bool},V<:AbstractMatrix{Bool}}
+    dense::A
+    valid::V
+    window::Union{Nothing,Int}
+end
+
+dense_mask(m::AttentionMask) = m.dense
+dense_mask(m) = m
+release_one!(m::AttentionMask) = release!(m.dense, m.valid)
+
+"""
     qkv_attention(qkv, heads, rope_base, mask, scale) -> (d, L, B)
 
 Multi-head self-attention from the fused projection `qkv` `(3d, L, B)` (`[q; k; v]` along the
@@ -109,7 +128,7 @@ function qkv_attention(qkv::AbstractArray{T,3}, H::Integer, base, mask, scale::R
     if base !== nothing
         q, k = rope(q, base), rope(k, base)
     end
-    reshape(attention(q, k, v, mask, scale), d, L, B)
+    reshape(attention(q, k, v, dense_mask(mask), scale), d, L, B)
 end
 
 """

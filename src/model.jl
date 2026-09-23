@@ -72,8 +72,11 @@ embed(E::AbstractMatrix, ids::AbstractArray{<:Integer}) =
 function (m::ModernBert)(input_ids, attention_mask; trace=nothing)
     x = m.embed_norm(embed(m.tok_embeddings, input_ids))
     trace === nothing || (trace["embeddings"] = x)
-    masks = map(mk -> on_device_of(x, mk), attention_masks(attention_mask, m.config.local_attention))
-    trace === nothing || (trace["mask_full"] = masks.full; trace["mask_sliding"] = masks.sliding)
+    dense = attention_masks(attention_mask, m.config.local_attention)
+    valid = on_device_of(x, attention_mask)
+    masks = (full=AttentionMask(on_device_of(x, dense.full), valid, nothing),
+             sliding=AttentionMask(on_device_of(x, dense.sliding), valid, m.config.local_attention ÷ 2))
+    trace === nothing || (trace["mask_full"] = masks.full.dense; trace["mask_sliding"] = masks.sliding.dense)
     first_norm = m.layers[1].attn_norm
     h = first_norm === nothing ? x : first_norm(x)
     for (i, layer) in enumerate(m.layers)
@@ -82,7 +85,7 @@ function (m::ModernBert)(input_ids, attention_mask; trace=nothing)
         trace === nothing ? release!(x) : (trace["layer_$(i-1)"] = y)
         x = y
     end
-    trace === nothing && release!(x, masks...)
+    trace === nothing && release!(x, masks.full.dense, masks.sliding)
     h    # final_norm of the last layer's output
 end
 
@@ -147,7 +150,7 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     trace === nothing || (trace["encoder"] = h)
     h = h .+ reshape(gather_columns(m.type_emb, qtype .+ 1), :, 1, B)
     trace === nothing || (trace["typed"] = h)
-    hmask = on_device_of(h, reshape(mask, size(mask, 1), 1, B))
+    hmask = AttentionMask(on_device_of(h, reshape(mask, size(mask, 1), 1, B)), on_device_of(h, mask), nothing)
     for (i, layer) in enumerate(m.head)
         h = layer(h, hmask)
         trace === nothing || (trace["head_$(i-1)"] = h)
