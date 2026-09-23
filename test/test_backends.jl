@@ -20,7 +20,7 @@ selected(r) = Dict(k => a["type"] == "choice" ? a["choice"] :
 end
 
 if get(ENV, "LAYA_TEST_METAL", "0") == "1"
-    using Metal
+    using Metal, Random
     @testset "Metal: tiny checkpoint, $T" for (T, tol) in ((Float32, 1e-5), (Float16, 1e-2))
         dir = R.tiny_checkpoint(joinpath(mktempdir(), "checkpoint"))
         ref = R.load(dir; dtype=T == Float32 ? "float32" : "float16", device="gpu")
@@ -58,8 +58,9 @@ if get(ENV, "LAYA_TEST_METAL", "0") == "1"
     @testset "Metal: attention with AttentionMask, $T" for T in (Float32, Float16)
         tol = T == Float32 ? 1e-5 : 2e-2
         H = 16
+        rng = Random.Xoshiro(1)     # unseeded, the Float16 error reached 0.016 at L=512
         for (L, B) in ((93, 4), (200, 4), (300, 4), (512, 2)), window in (128, 16)
-            qkv = randn(T, 3 * 64H, L, B)
+            qkv = randn(rng, T, 3 * 64H, L, B)
             valid = trues(L, B)
             valid[L÷2+1:end, 2] .= false                                  # right padding
             B > 2 && (valid[[3, 10, L], 3] .= false)                      # holes

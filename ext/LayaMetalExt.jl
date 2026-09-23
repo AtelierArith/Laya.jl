@@ -546,9 +546,10 @@ function Laya.qkv_attention(qkv::MtlArray{T,3}, H::Integer, base, am, scale::Rea
     usemask = mask isa AbstractArray
     m = usemask ? mask : y
     Mq = usemask ? size(mask, 2) : 1
-    # local attention: tiles outside the window are not visited (`window < 0`: all tiles)
-    windowed = am isa Laya.AttentionMask && am.window !== nothing
-    valid, window = windowed ? (am.valid, Int32(am.window)) : (m, Int32(-1))
+    # local attention: tiles outside the window are not visited (`window < 0`: all tiles).
+    # `valid` is passed for every AttentionMask so that all layers share one compiled kernel.
+    valid = am isa Laya.AttentionMask ? am.valid : m
+    window = am isa Laya.AttentionMask && am.window !== nothing ? Int32(am.window) : Int32(-1)
     c, s = base === nothing ? (qkv, qkv) : rope_tables(T, FA_HD, L, base)
     @metal threads=FA_THREADS groups=(cld(L, FA_BQ), H, B) attention_kernel(y, qkv, c, s, m, valid, window, Int32(H), Int32(L), Int32(Mq), usemask, base !== nothing, Float32(scale))
     y
