@@ -6,8 +6,11 @@ using Metal: Metal, MetalBackend, MtlArray, MtlMatrix, MtlThreadGroupArray, @met
     thread_position_in_threadgroup_1d, threadgroup_position_in_grid_1d, threadgroup_position_in_grid_3d,
     thread_position_in_grid_2d, thread_position_in_grid_3d,
     simdgroup_load, simdgroup_store, simdgroup_multiply_accumulate
-using Metal: GPUArrays
-using Metal.MPSGraphs: graph_matmul!
+using Metal: GPUArrays, MPS
+# Metal.jl's cached matmul graphs (internal names, pinned by the `[compat]` bound on Metal)
+using Metal.MPSGraphs: MatmulGraphKey, CachedMatmulGraph, _matmul_graph_cache, _matmul_graph_cache_lock,
+    MPSGraphTensor, MPSGraphTensorData, default_exec_desc
+using Metal.ObjectiveC.Foundation: @autoreleasepool, NSDictionary, nil
 
 # `Laya.load(repo; backend=MetalBackend())`. The model code in Laya is generic over array
 # types; this extension moves the weights to the GPU and specializes the hot spots for
@@ -132,7 +135,7 @@ end
 
 `C = op(A) * op(B)` for column-major `C` `(m, n)` and `op(A)` `(m, k)`, `batch` times over
 consecutive matrices, whatever the arrays' own shapes, through Metal.jl's cached MPSGraph
-matmul. (MPSMatrixMultiplication encoded by hand was faster to enqueue but produced NaN
+matmul graphs. (MPSMatrixMultiplication encoded by hand was faster to enqueue but produced NaN
 about once per hundred forwards, so it is not used.)
 """
 function matmul!(C::MtlArray, A::MtlArray, B::MtlArray, tA::Bool, tB::Bool, m::Integer, n::Integer, k::Integer;
@@ -141,16 +144,39 @@ function matmul!(C::MtlArray, A::MtlArray, B::MtlArray, tA::Bool, tB::Bool, m::I
         c = reshape(C, m, n)
         a = tA ? reshape(A, k, m) : reshape(A, m, k)
         b = tB ? reshape(B, n, k) : reshape(B, k, n)
-        graph_matmul!(c, a, b, true, false, tA ? 'T' : 'N', tB ? 'T' : 'N')
+        graph_matmul_batched!(c, a, b, tA ? 'T' : 'N', tB ? 'T' : 'N')
         # Drop the views' references now, so the parents can go back to the pool (`reshape`
         # returns the array itself when the shape already matches).
         c === C || Metal.unsafe_free!(c)
         a === A || Metal.unsafe_free!(a)
         b === B || Metal.unsafe_free!(b)
     else
-        graph_matmul!(C, A, B, true, false, tA ? 'T' : 'N', tB ? 'T' : 'N')
+        graph_matmul_batched!(C, A, B, tA ? 'T' : 'N', tB ? 'T' : 'N')
     end
     C
+end
+
+# `Metal.MPSGraphs.graph_matmul!` (alpha = 1, beta = 0) with the graph encoded into the batched
+# command buffer of Metal.jl's queue. `graph_matmul!` itself commits a command buffer of its own
+# per call, which also flushes the kernel batch: about 170 command buffers per forward pass,
+# each with its submission latency. Encoded in the batch, a single-question forward pass runs
+# in a handful of command buffers. The operands stay alive with the batch's roots.
+@autoreleasepool function graph_matmul_batched!(c::MtlArray, a::MtlArray{T}, b::MtlArray{T}, tA::Char, tB::Char) where {T}
+    key = MatmulGraphKey(a, b, c, true, false, tA, tB)
+    cached = @lock _matmul_graph_cache_lock get!(_matmul_graph_cache, key) do
+        CachedMatmulGraph(key)
+    end
+    feeds = Dict{MPSGraphTensor,MPSGraphTensorData}(
+        cached.place_a => MPSGraphTensorData(a), cached.place_b => MPSGraphTensorData(b),
+        cached.place_c => MPSGraphTensorData(c))
+    results = Dict{MPSGraphTensor,MPSGraphTensorData}(cached.result => feeds[cached.place_c])
+    bq = Metal.global_queue(Metal.device())
+    Metal.end_encoder!(bq)
+    cmdbuf = MPS.MPSCommandBuffer(Metal.ensure_cmdbuf!(bq))
+    MPS.encode!(cmdbuf, cached.graph, NSDictionary(feeds), NSDictionary(results), nil, default_exec_desc())
+    Metal.record_operation!(bq, a, b, c, feeds, results, cmdbuf)
+    Metal.maybe_autoflush!(bq)
+    c
 end
 
 function (l::Linear{<:MtlMatrix{T}})(x::MtlArray{T}) where {T}
@@ -184,6 +210,10 @@ end
 @inline divmod1(a::Int32, n::Int32) = (q = (a - Int32(1)) ÷ n; (q + Int32(1), a - q * n))   # (cld(a, n), mod1(a, n))
 
 # ---------------------------------------------------------------------------- reductions
+
+# Metal's fast exp (relative error about 1e-6, exp(-Inf) = 0): the softmax kernels spend a
+# sixth of their time in the precise one.
+@inline fast_exp(x::Float32) = ccall("extern air.fast_exp.f32", llvmcall, Float32, (Float32,), x)
 
 # LayerNorm and softmax reduce over one column per simdgroup (32 lanes, shuffles instead of
 # barriers), `REDUCE_COLS` columns per threadgroup. Metal.jl's simdgroup and lane indices are
@@ -274,11 +304,11 @@ function masked_softmax_kernel(P, S, mask, Lk, Lq, H, Mq, usemask, ncol)
     m = simd_reduce(max, m)
     t = 0.0f0
     for j in lane:Int32(SIMD):Lk
-        @inbounds t += keep(j) ? exp(S[o+j] - m) : 0.0f0
+        @inbounds t += keep(j) ? fast_exp(S[o+j] - m) : 0.0f0
     end
     r = 1.0f0 / simd_reduce(+, t)
     for j in lane:Int32(SIMD):Lk
-        @inbounds P[o+j] = keep(j) ? exp(S[o+j] - m) * r : 0.0f0
+        @inbounds P[o+j] = keep(j) ? fast_exp(S[o+j] - m) * r : 0.0f0
     end
     return
 end
@@ -522,11 +552,11 @@ function attention_kernel(y, qkv, c, s, mask, H, L, Mq, usemask, userope, scale)
         mt = max(mt, simd_shuffle_xor(mt, Int16(1)))
         mt = max(mt, simd_shuffle_xor(mt, Int16(2)))
         mn = max(m, mt)
-        α = mn == m ? 1.0f0 : exp(m - mn)
+        α = mn == m ? 1.0f0 : fast_exp(m - mn)
         p = 0.0f0
         for j in Int32(1):Int32(8)
             keep = (bits >> (j - Int32(1))) & Int32(1) == Int32(1)
-            @inbounds e = keep ? exp(St[so+j] - mn) : 0.0f0
+            @inbounds e = keep ? fast_exp(St[so+j] - mn) : 0.0f0
             @inbounds St[so+j] = e
             p += e
         end
