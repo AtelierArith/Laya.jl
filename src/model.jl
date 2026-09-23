@@ -1,17 +1,24 @@
 # ModernBERT encoder and Laya decision heads (inference only), following
 # `laya_mlx/model.py`. Token ids and marker positions are 0-based, as in Python.
 
-struct EncoderLayer{T}
+# The model structs carry their layers' concrete types as parameters (`T` is the element
+# type), so that the forward pass is inferred end to end: a field of an abstract type would
+# cost a dynamic dispatch at every use. All encoder layers share one type: the first layer's
+# `attn_norm` is `nothing` (identity), typed as `Union{Nothing, N}` with `N` the others' type.
+struct EncoderLayer{T,N<:LayerNorm,A<:Linear,B<:Linear,C<:Linear,D<:Linear}
     kind::Symbol
-    attn_norm::Union{Nothing,LayerNorm}   # identity for the first layer
-    Wqkv::Linear
-    Wo::Linear
+    attn_norm::Union{Nothing,N}   # identity for the first layer
+    Wqkv::A
+    Wo::B
     num_heads::Int
     base::Float64
-    mlp_norm::LayerNorm
-    Wi::Linear
-    Wo_mlp::Linear
+    mlp_norm::N
+    Wi::C
+    Wo_mlp::D
 end
+EncoderLayer{T}(kind, attn_norm::Union{Nothing,N}, Wqkv::A, Wo::B, num_heads, base, mlp_norm::N, Wi::C,
+    Wo_mlp::D) where {T,N<:LayerNorm,A<:Linear,B<:Linear,C<:Linear,D<:Linear} =
+    EncoderLayer{T,N,A,B,C,D}(kind, attn_norm, Wqkv, Wo, num_heads, base, mlp_norm, Wi, Wo_mlp)
 
 function (layer::EncoderLayer)(x, mask)
     h = layer.attn_norm === nothing ? x : layer.attn_norm(x)
@@ -40,13 +47,15 @@ function (layer::EncoderLayer{T})(x, h, mask, next_norm) where {T}
     y, hn
 end
 
-struct ModernBert{T}
+struct ModernBert{T,E<:AbstractMatrix{T},N1<:LayerNorm,L<:EncoderLayer{T},N2<:LayerNorm}
     config::EncoderConfig
-    tok_embeddings::AbstractMatrix{T}        # (hidden, vocab)
-    embed_norm::LayerNorm
-    layers::Vector{EncoderLayer{T}}
-    final_norm::LayerNorm
+    tok_embeddings::E                        # (hidden, vocab)
+    embed_norm::N1
+    layers::Vector{L}
+    final_norm::N2
 end
+ModernBert{T}(config, tok_embeddings::E, embed_norm::N1, layers::Vector{L}, final_norm::N2) where {T,E,N1,L,N2} =
+    ModernBert{T,E,N1,L,N2}(config, tok_embeddings, embed_norm, layers, final_norm)
 
 """
     attention_masks(attention_mask, window) -> (full, sliding)
@@ -89,14 +98,14 @@ function (m::ModernBert)(input_ids, attention_mask; trace=nothing)
     h    # final_norm of the last layer's output
 end
 
-struct HeadLayer
+struct HeadLayer{N1<:LayerNorm,A<:Linear,B<:Linear,N2<:LayerNorm,C<:Linear,D<:Linear}
     num_heads::Int
-    norm1::LayerNorm
-    in_proj::Linear
-    out_proj::Linear
-    norm2::LayerNorm
-    linear1::Linear
-    linear2::Linear
+    norm1::N1
+    in_proj::A
+    out_proj::B
+    norm2::N2
+    linear1::C
+    linear2::D
 end
 
 function (layer::HeadLayer)(x::AbstractArray{T}, mask) where {T}
@@ -128,16 +137,20 @@ scorer and the action head, with parameters of element type `T`. Load one with
 [`load_model`](@ref) (or through [`load`](@ref)); call it on a [`collate`](@ref)d batch.
 Its weights may live in any array type (see [`adapt_arrays`](@ref)).
 """
-struct DecisionModel{T}
-    encoder::ModernBert{T}
-    head::Vector{HeadLayer}
-    type_emb::AbstractMatrix{T}              # (hidden, 3)
-    scorer_norm::LayerNorm
-    scorer1::Linear
-    scorer2::Linear
-    act1::Linear
-    act2::Linear
+struct DecisionModel{T,M<:ModernBert{T},H<:HeadLayer,E<:AbstractMatrix{T},N<:LayerNorm,S1<:Linear,S2<:Linear,
+                     A1<:Linear,A2<:Linear}
+    encoder::M
+    head::Vector{H}
+    type_emb::E                              # (hidden, 3)
+    scorer_norm::N
+    scorer1::S1
+    scorer2::S2
+    act1::A1
+    act2::A2
 end
+DecisionModel{T}(encoder::M, head::Vector{H}, type_emb::E, scorer_norm::N, scorer1::S1, scorer2::S2, act1::A1,
+    act2::A2) where {T,M,H,E,N,S1,S2,A1,A2} =
+    DecisionModel{T,M,H,E,N,S1,S2,A1,A2}(encoder, head, type_emb, scorer_norm, scorer1, scorer2, act1, act2)
 
 Base.eltype(::DecisionModel{T}) where {T} = T
 
@@ -151,9 +164,12 @@ weights live in (see [`on_device_of`](@ref)); the pooled features are computed o
 intermediate activation under the same keys as `LayaMLXReference.trace`.
 """
 function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
-    ids, mask = batch["input_ids"], Bool.(batch["attention_mask"])
-    marker_pos, marker_mask = batch["marker_pos"], Bool.(batch["marker_mask"])
-    qtype = batch["qtype"]
+    # The batch is a `Dict{String, Array}`: fix the element types here, so the rest is inferred.
+    ids = convert(Matrix{Int32}, batch["input_ids"])::Matrix{Int32}
+    mask = convert(Matrix{Bool}, batch["attention_mask"])::Matrix{Bool}
+    marker_pos = convert(Matrix{Int32}, batch["marker_pos"])::Matrix{Int32}
+    marker_mask = convert(Matrix{Bool}, batch["marker_mask"])::Matrix{Bool}
+    qtype = convert(Vector{Int32}, batch["qtype"])::Vector{Int32}
     B = size(ids, 2)
 
     # Intermediates are released as soon as they are dead (a no-op on the CPU), except in

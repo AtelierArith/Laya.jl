@@ -121,7 +121,7 @@ end
 
 dense_mask(m::AttentionMask) = m.dense
 dense_mask(m) = m
-release_one!(m::AttentionMask) = release!(m.dense, m.valid)
+release_one!(m::AttentionMask) = (release_one!(m.dense); release_one!(m.valid); nothing)   # not through `release!`: keeps inference free of recursion
 
 """
     qkv_attention(qkv, heads, rope_base, mask, scale) -> (d, L, B)
