@@ -71,8 +71,10 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 - `AccelerateBackend` forwards BLAS process-wide, so every CPU model in the process uses
   Accelerate afterwards.
 - `MetalBackend` runs the same `DecisionModel` code with its weights in `MtlArray`s. Laya
-  specializes a few hot spots for `MtlArray` (fused Metal kernels for LayerNorm, GeGLU and the
-  attention glue, and batched matmuls over all heads).
+  specializes a few hot spots for `MtlArray`: one fused attention kernel (simdgroup matrix
+  units, no score matrices in memory, masked tiles skipped), simdgroup LayerNorm and GeGLU
+  kernels, MPSGraph matmuls for the linear layers, and a buffer pool so that a warm forward
+  pass allocates no device memory.
 - A new backend only needs a method of `Laya.load_backend_model(backend, dir, dtype)`.
 
 ### Checkpoints
@@ -114,28 +116,30 @@ Every backend is checked against the Python implementation (see `test/runtests.j
   in float32 and about 2e-3 in float16.
 - **`LayaMLX`**: bit-identical (0.0 error) in float32 and float16, on both checkpoints.
 
-Apple M4, `aac6fef/laya-mlx`, float32, end-to-end p50 (tokenization, prompts, forward,
-calibration and results; model loading excluded). `short:N` asks N questions about a short
-state (93 tokens); `long:N` uses a state that fills the 512-token context.
+Apple M2 Max (38 GPU cores, 96 GB), `aac6fef/laya-mlx`, float32, end-to-end p50
+(tokenization, prompts, forward, calibration and results; model loading excluded). `short:N`
+asks N questions about a short state (93 tokens); `long:N` uses a state that fills the
+512-token context.
 
 | backend | short:1 | short:10 | short:50 | long:1 | long:10 |
 |---|---:|---:|---:|---:|---:|
-| Python laya-mlx (MLX GPU) | 41 ms | 312 ms | 1602 ms | 190 ms | 2456 ms |
-| `LayaMLX` (MLX GPU via mlx-c) | 42 ms | 312 ms | 1609 ms | 196 ms | 3312 ms |
-| `Laya` + `MetalBackend()` (GPU) | 62 ms | 339 ms | 1937 ms | 245 ms | 4890 ms |
-| `Laya` + `AccelerateBackend()` (CPU) | 109 ms | 796 ms | 5366 ms | – | – |
+| Python laya-mlx (MLX GPU) | 17 ms | 94 ms | 410 ms | 55 ms | 481 ms |
+| `Laya` + `MetalBackend()` (GPU) | 23 ms | 97 ms | 402 ms | 66 ms | 501 ms |
 
-- **How the GPU rows were measured**: from a cooled machine, in the order Metal, LayaMLX,
-  Python, Python, LayaMLX, Metal. Each ran in its own process with 90 s pauses in between.
-  The table shows each backend's faster run (10 iterations after 2 warmups). The script and
-  raw results are in `benchmark/results/gpu-fair-2026-09-23/`. The CPU row is from an
-  earlier run.
-- **Answers**: every backend selected the same answers on every workload.
-- **Heat**: sustained GPU load throttles this machine. Later runs were up to 2× slower,
-  especially `long:10`, so treat differences at `long:10` with care.
-- **Reading the results**: `LayaMLX` matches Python up to 50 short questions. The Metal
-  backend is within 10-20% for batches of questions, but slower for a single question
-  (62 ms vs 41 ms), where the launch overhead of its per-op kernels dominates.
+- **How the GPU rows were measured**: on an idle machine (load average below 4 for two
+  minutes), cooled for 120 s, in the order Metal, Python, Python, Metal with 60 s pauses in
+  between, each in its own process. The table shows each backend's faster run (10 iterations
+  after 2 warmups). The script and raw results are in
+  `benchmark/results/gpu-fair-2026-09-23-m2max/`.
+- **Answers**: both backends selected the same answers on every workload.
+- **Reading the results**: the Metal backend matches MLX from 10 questions upwards and is
+  6-10 ms behind for a single question, where the cost of enqueuing about 200 kernel and
+  matmul launches from Julia shows. Other CPU load distorts the Metal numbers far more than
+  the MLX ones (see `docs/agents/workarounds.md`).
+- An earlier comparison on an Apple M4 (24 GiB), before the fused attention kernel and the
+  buffer pool, is in `benchmark/results/gpu-fair-2026-09-23/`; there the Metal backend was
+  1.1-2x slower than MLX. `LayaMLX` matched Python on that machine up to 50 short questions;
+  the CPU backend with Accelerate took 109 ms / 796 ms / 5366 ms for `short:1/10/50`.
 
 See `benchmark/` for the method and the raw results.
 
@@ -163,8 +167,8 @@ Not ported yet:
 
 Known gaps:
 
-- `MetalBackend` is slower than MLX for a single question (62 ms vs 41 ms; kernel launch
-  overhead) and for long inputs.
+- `MetalBackend` is 6-10 ms behind MLX for a single question (launch overhead of the
+  per-op kernels; MLX fuses more).
 
 ## Acknowledgements
 

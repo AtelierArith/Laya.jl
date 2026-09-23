@@ -103,11 +103,21 @@ function (layer::HeadLayer)(x::AbstractArray{T}, mask) where {T}
     d, L, B = size(x)
     H = layer.num_heads
     hd = d ÷ H
-    a = qkv_attention(layer.in_proj(layer.norm1(x)), H, nothing, mask, T(hd)^T(-0.5))
+    n = layer.norm1(x)
+    qkv = layer.in_proj(n)
+    release!(n)
+    a = qkv_attention(qkv, H, nothing, mask, T(hd)^T(-0.5))
+    release!(qkv)
     x1, h = residual_norm(x, layer.out_proj(a), layer.norm2)
     release!(a)
     # PyTorch TransformerEncoderLayer defaults to ReLU; the encoder and scorer use GELU.
-    residual(x1, layer.linear2(relu.(layer.linear1(h))))
+    u = layer.linear1(h)
+    release!(h)
+    r = relu.(u)
+    release!(u)
+    y = residual(x1, layer.linear2(r))
+    release!(x1, r)
+    y
 end
 
 """
@@ -146,20 +156,33 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     qtype = batch["qtype"]
     B = size(ids, 2)
 
-    h = m.encoder(ids, mask; trace)
-    trace === nothing || (trace["encoder"] = h)
-    h = h .+ reshape(gather_columns(m.type_emb, qtype .+ 1), :, 1, B)
+    # Intermediates are released as soon as they are dead (a no-op on the CPU), except in
+    # trace mode, where they are recorded.
+    done!(xs...) = trace === nothing ? release!(xs...) : nothing
+    e = m.encoder(ids, mask; trace)
+    trace === nothing || (trace["encoder"] = e)
+    te = gather_columns(m.type_emb, qtype .+ 1)
+    h = e .+ reshape(te, :, 1, B)
+    done!(e); release!(te)
     trace === nothing || (trace["typed"] = h)
     hmask = AttentionMask(on_device_of(h, reshape(mask, size(mask, 1), 1, B)), on_device_of(h, mask), nothing)
     for (i, layer) in enumerate(m.head)
-        h = layer(h, hmask)
+        hi = layer(h, hmask)
+        done!(h)
+        h = hi
         trace === nothing || (trace["head_$(i-1)"] = h)
     end
+    release!(hmask)
 
     d, L, K = size(h, 1), size(h, 2), size(marker_pos, 1)
     columns = [(b - 1) * L + max(marker_pos[j, b], 0) + 1 for j in 1:K, b in 1:B]
     markers = reshape(gather_columns(reshape(h, d, :), vec(columns)), d, K, B)
-    logits = to_host(Float32.(dropdims(m.scorer2(gelu.(m.scorer1(m.scorer_norm(markers)))); dims=1)))
+    s0 = m.scorer_norm(markers)
+    s1 = m.scorer1(s0)
+    g1 = gelu.(s1)
+    s2 = m.scorer2(g1)
+    logits = to_host(Float32.(dropdims(s2; dims=1)))
+    release!(markers, s0, s1, g1, s2)
     logits = ifelse.(marker_mask, logits, -1.0f4)
     p = softmax(logits; dims=1)
     k = Float32.(max.(sum(marker_mask; dims=1), 2))
@@ -168,7 +191,13 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
     top = mapslices(c -> partialsort(c, 1:2; rev=true), p; dims=1)   # (2, B): best, second
     features = vcat(top[1:1, :], top[1:1, :] .- top[2:2, :], entropy, k ./ 255.0f0)
     pooled = vcat(to_host(Float32.(h[:, 1, :])), features)
-    action = to_host(Float32.(m.act2(gelu.(m.act1(on_device_of(h, T.(pooled)))))))
+    done!(h)
+    pin = on_device_of(e, T.(pooled))
+    a1 = m.act1(pin)
+    g2 = gelu.(a1)
+    a2 = m.act2(g2)
+    action = to_host(Float32.(a2))
+    release!(pin, a1, g2, a2)
     if trace !== nothing
         trace["logits"] = logits
         trace["action"] = action
