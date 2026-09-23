@@ -17,6 +17,26 @@ is, and `SETUP.md` covers the development setup.
     backends move the weights with `adapt_arrays` and specialize hot spots by array type
     (`qkv_attention`, `LayerNorm`, `residual_norm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
     `Array`. Host/device crossings go through `on_device_of`, `to_host` and `gather_columns`.
+- **`LayaMetalExt` rules** (learned the hard way; details and minimal examples in
+  `docs/agents/workarounds.md`):
+  - `release!` never frees a device buffer: Metal.jl passes kernel arguments by GPU address,
+    so freeing a buffer that queued work still reads is a use-after-free. Released buffers
+    go to the pool (`pooled`, keyed by queue, element type and size) and are reused in
+    queue order.
+  - Matrix products read their output operand even with `beta = 0` (MPSGraph always,
+    `MPSMatrixMultiplication` with `alpha != 1`), so a pool buffer must never hold NaN:
+    new pool buffers are zeroed and the key includes the element type. Do not pass
+    `alpha`; fold scales into an input.
+  - Hand-encoded MPS kernels produced NaN about once in 100 forwards; the linear layers use
+    Metal.jl's cached MPSGraph `graph_matmul!`.
+  - Metal.jl's simdgroup and lane indices are 1-based; `Base.reshape` may return its
+    argument, so never `unsafe_free!` a "view" without checking `===`.
+  - After touching the extension, run the `backends` test group **and** a determinism
+    stress (50+ identical forwards of `short:1`, `short:10`, `short:3`, `long:1`, `long:10`
+    compared bitwise): the failures above were all transient and invisible to a single
+    comparison against the reference.
+  - Judge kernel changes by the full forward pass, not by microbenchmarks of one kernel:
+    the GPU's clock state changes small-kernel timings 2-3×.
 - **`LayaMLX/` is a separate package** that is not registered and uses a local dylib. It
   depends on `Laya`, never the other way round, and plugs in as `MLXBackend()`. It is not a
   weak dependency of `Laya`.
@@ -31,12 +51,13 @@ is, and `SETUP.md` covers the development setup.
   Scratch.jl space. Prefer Julia-ecosystem conventions (Scratch.jl, Preferences.jl, stdlib
   Downloads) over copying Python's layouts.
 
-## Machine limits (Apple M4, 24 GiB)
+## Machine limits (Apple M4, 24 GiB; the README's numbers are from this machine)
 
 - **One checkpoint per process.** Run model-loading jobs (tests on real checkpoints,
   benchmarks) one after another, never in parallel. The 421M model is about 3 GiB in Julia
   Float32 plus the Python reference in the same process. `LAYAMLX_TEST_REPOS` accepts one
-  repository per process.
+  repository per process. Even on a machine with more memory, run GPU jobs one at a time:
+  a concurrent job distorts every timing.
 - **Ask before starting long or memory-heavy runs**, such as the full benchmark or tests on
   real checkpoints.
 - **GPU timings depend on the machine's thermal state.** A backend that runs right after

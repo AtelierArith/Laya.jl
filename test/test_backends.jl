@@ -35,6 +35,59 @@ if get(ENV, "LAYA_TEST_METAL", "0") == "1"
         @test selected(predict(agent, "hello", QUESTIONS)) == selected(R.predict(ref, "hello", QUESTIONS))
     end
 
+    @testset "Metal: attention vs CPU, $T" for T in (Float32, Float16)
+        tol = T == Float32 ? 1e-5 : 2e-2
+        for (H, L, B) in ((16, 93, 1), (16, 93, 10), (16, 45, 2), (16, 200, 1), (16, 7, 1), (4, 93, 2))   # H = 4: head_dim 32, the unfused path
+            d = 64H ÷ (H == 4 ? 2 : 1)
+            qkv = randn(T, 3d, L, B)
+            valid = trues(L, B)
+            B > 1 && (valid[L÷2+1:end, 2] .= false)                      # padded sequence
+            masks = Laya.attention_masks(valid, 128)
+            for (base, mask) in ((10000.0, masks.full), (10000.0, masks.sliding), (nothing, reshape(valid, L, 1, B)), (10000.0, nothing))
+                B > 1 && mask === nothing && continue
+                ref = Laya.qkv_attention(qkv, H, base, mask, T(d ÷ H)^T(-0.5))
+                out = Laya.qkv_attention(MtlArray(qkv), H, base, mask === nothing ? nothing : MtlArray(mask), T(d ÷ H)^T(-0.5))
+                err = maxerr(Array(out)[:, valid], ref[:, valid]) / maximum(abs, Float32.(ref[:, valid]))
+                @test err < tol
+            end
+        end
+    end
+
+    @testset "Metal: attention ignores garbage in pooled buffers" begin
+        E = Base.get_extension(Laya, :LayaMetalExt)
+        for H in (16, 4)                                # the fused and the unfused path
+            hd, L, B = 64, 45, 1
+            d = H == 4 ? 128 : 64H
+            qkv = MtlArray(randn(Float32, 3d, L, B))
+            # Poison the pool: every buffer size the attention can take out of it holds NaN
+            # (a matmul must not read its uninitialized output operand).
+            for dims in ((d, L, B), (d ÷ H, L, H * B), (L, L, H * B))
+                for _ in 1:3
+                    x = E.pooled(Float32, dims)
+                    fill!(x, NaN32)
+                    Laya.release!(x)
+                end
+            end
+            y = Laya.qkv_attention(qkv, H, 10000.0, nothing, 0.125)
+            @test !any(isnan, Array(y))
+            @test Array(y) ≈ Laya.qkv_attention(Array(qkv), H, 10000.0, nothing, 0.125) atol=1e-4
+        end
+    end
+
+    @testset "Metal: warm forwards reuse device buffers" begin
+        E = Base.get_extension(Laya, :LayaMetalExt)
+        dir = R.tiny_checkpoint(joinpath(mktempdir(), "checkpoint"))
+        ref = R.load(dir; dtype="float32", device="gpu")
+        agent = Laya.load(dir; dtype=Float32, backend=MetalBackend())
+        batch = R.collate(ref, R.prepare(ref, join(fill("hello", 100), " "), QUESTIONS))
+        expected = agent.model(batch)
+        agent.model(batch)
+        GC.gc(true)                           # dropped intermediates return to the pool
+        misses = E.POOL_MISSES[]
+        @test all(agent.model(batch) .≈ expected)
+        @test E.POOL_MISSES[] == misses       # every intermediate came from the pool
+    end
+
     @testset "Metal: $repo, $T" for repo in TEST_REPOS, T in (Float32, Float16)
         dir = cached_snapshot(repo)
         if dir === nothing
