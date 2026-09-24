@@ -804,10 +804,13 @@ end
 # so the MetalPerformanceShadersGraph framework is loaded by hand; Metal discards the command
 # buffers its kernels are encoded into while precompiling, so nothing actually runs on the
 # GPU. The extension's own pools hold session-local buffers and are emptied before the image
-# is written (Metal's own caches are process-local and never serialized).
+# is written (Metal's own caches are process-local and never serialized). Only Apple silicon
+# can run the workload: on other platforms the framework and the ObjectiveC runtime are
+# absent, so loading it would abort the extension's precompilation (Metal is in the test
+# environment everywhere).
 @setup_workload begin
     @compile_workload begin
-        if ccall(:jl_generating_output, Cint, ()) != 0
+        if ccall(:jl_generating_output, Cint, ()) != 0 && Sys.isapple() && Sys.ARCH === :aarch64
             Metal.load_framework("MetalPerformanceShadersGraph")
             Metal.initialized[] = true
             try
