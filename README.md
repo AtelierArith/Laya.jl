@@ -116,6 +116,17 @@ Every backend is checked against the Python implementation (see `test/runtests.j
   in float32 and about 2e-3 in float16.
 - **`LayaMLX`**: bit-identical (0.0 error) in float32 and float16, on both checkpoints.
 
+On the CPU the heavy work is BLAS: each `Linear` layer is a single
+`transpose(W) * X` GEMM (`src/layers.jl`) and attention uses `mul!`
+(`src/cpu.jl`), while `Threads.@threads` only covers LayerNorm, the GeGLU gate
+and the attention heads. The default BLAS thread count (the physical-core
+count) is therefore the fastest CPU configuration; starting Julia with `-t auto`
+does not help the CPU backend, and can be slower, because it lowers the BLAS
+thread count without moving the projections off BLAS. On an Intel i9-9900K
+(8 physical cores, OpenBLAS 0.3.30) a short (8-token) production forward took
+about 94 ms with the default BLAS threads versus about 287 ms with `-t 8` and
+`OPENBLAS_NUM_THREADS=1`.
+
 Apple M2 Max (38 GPU cores, 96 GB), `aac6fef/laya-mlx`, float32, end-to-end p50
 (tokenization, prompts, forward, calibration and results; model loading excluded). `short:N`
 asks N questions about a short state (93 tokens); `long:N` uses a state that fills the
