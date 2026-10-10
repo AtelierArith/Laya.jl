@@ -13,6 +13,7 @@ is, and `SETUP.md` covers the development setup.
     - `AccelerateBackend()` → `LayaAppleAccelerateExt`. Laya only prints a hint; it never loads
       AppleAccelerate itself.
     - `MetalBackend()` (Metal.jl's own type) → `LayaMetalExt`.
+    - `CUDABackend()` (CUDA.jl's own type) → `LayaCUDAExt` (notes in `docs/agents/cuda.md`).
   - The model code (`src/layers.jl`, `src/model.jl`) is generic over array types. Device
     backends move the weights with `adapt_arrays` and specialize hot spots by array type
     (`qkv_attention`, `LayerNorm`, `residual_norm`, `gelu_gate`, `release!`). `src/cpu.jl` does the same for
@@ -81,12 +82,15 @@ LAYA_TEST_BLAS=accelerate julia --project=. -e 'using Pkg; Pkg.test()' # same, w
 LAYA_TEST_GROUPS=aqua,smoke julia --project=. -e 'using Pkg; Pkg.test()' # what CI runs: no Python, no checkpoints
 LAYA_TEST_METAL=1 LAYA_TEST_GROUPS=backends \
     julia --project=. -e 'using Pkg; Pkg.test()'                      # Metal backend vs reference
+CUDA_VISIBLE_DEVICES=1 LAYA_TEST_GROUPS=cuda \
+    julia --project=. -e 'using Pkg; Pkg.test()'                      # CUDA backend vs CPU (skipped without a GPU)
 julia --project=LayaMLX/test LayaMLX/test/runtests.jl                  # LayaMLX ops + tiny checkpoint
 LAYAMLX_TEST_REPOS=aac6fef/laya-mlx LAYAMLX_TEST_DTYPES=float32 \
     julia --project=LayaMLX/test LayaMLX/test/runtests.jl              # one real checkpoint
 julia --project=reference -e 'using Pkg; Pkg.test()'                   # the Python bridge
 benchmark/run.sh                                                       # see benchmark/README.md
 BACKENDS=metal DTYPE=float16 benchmark/run.sh                          # Metal only
+BACKENDS="julia cuda" BLAS=openblas benchmark/run.sh                   # CPU vs CUDA (Linux)
 cd LayaMLX/gen && julia --project=. generator.jl                       # regenerate src/LibMLX.jl
 deps/build.sh                                                          # rebuild mlx-c into deps/usr
 julia --project=docs docs/make.jl                                      # Documenter.jl docs (docs/src)

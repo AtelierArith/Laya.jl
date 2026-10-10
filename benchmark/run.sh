@@ -4,7 +4,7 @@
 #
 #   benchmark/run.sh [model ...]            (default: aac6fef/laya-mlx)
 #   ITERATIONS=10 WARMUP=2 DTYPE=float32 WORKLOADS=short:1,short:10 benchmark/run.sh
-#   BACKENDS="python julia mlxc metal"      (default: python julia mlxc)
+#   BACKENDS="python julia mlxc metal cuda" (default: python julia mlxc)
 #   BLAS="accelerate openblas"              (Julia CPU BLAS backends; default: accelerate)
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -36,6 +36,10 @@ for model in "${models[@]}"; do
         echo "== julia-metal-gpu $model $DTYPE"
         julia --startup-file=no --project=. bench_julia.jl --model "$model" "${common[@]}" --backend metal \
           --output "results/${tag}-${DTYPE}-julia-metal-gpu.json" ;;
+      cuda)
+        echo "== julia-cuda-gpu $model $DTYPE"
+        julia --startup-file=no --project=. bench_julia.jl --model "$model" "${common[@]}" --backend cuda \
+          --output "results/${tag}-${DTYPE}-julia-cuda-gpu.json" ;;
       mlxc)
         echo "== julia-mlxc-gpu $model $DTYPE"
         julia --startup-file=no --project=../LayaMLX/bench ../LayaMLX/bench.jl --model "$model" "${common[@]}" \

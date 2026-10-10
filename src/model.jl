@@ -76,10 +76,17 @@ function attention_masks(attention_mask::AbstractMatrix{Bool}, window::Integer)
 end
 
 embed(E::AbstractMatrix, ids::AbstractArray{<:Integer}) =
-    reshape(gather_columns(E, vec(ids) .+ 1), size(E, 1), size(ids)...)
+    reshaped(gather_columns(E, vec(ids) .+ 1), size(E, 1), size(ids)...)
+
+# `reshape(x, dims...)` that drops `x` when the reshape is a new array sharing its memory, so
+# that a device pool gets the buffer back once the reshape is released (`reshape` may also
+# return `x` itself).
+reshaped(x, dims...) = (y = reshape(x, dims...); y === x || release!(x); y)
 
 function (m::ModernBert)(input_ids, attention_mask; trace=nothing)
-    x = m.embed_norm(embed(m.tok_embeddings, input_ids))
+    emb = embed(m.tok_embeddings, input_ids)
+    x = m.embed_norm(emb)
+    release!(emb)
     trace === nothing || (trace["embeddings"] = x)
     dense = attention_masks(attention_mask, m.config.local_attention)
     valid = on_device_of(x, attention_mask)
@@ -192,7 +199,10 @@ function (m::DecisionModel{T})(batch::AbstractDict; trace=nothing) where {T}
 
     d, L, K = size(h, 1), size(h, 2), size(marker_pos, 1)
     columns = [(b - 1) * L + max(marker_pos[j, b], 0) + 1 for j in 1:K, b in 1:B]
-    markers = reshape(gather_columns(reshape(h, d, :), vec(columns)), d, K, B)
+    hflat = reshape(h, d, :)
+    g = gather_columns(hflat, vec(columns))
+    hflat === h || release!(hflat)            # only the view's reference: `h` is used below
+    markers = reshaped(g, d, K, B)
     s0 = m.scorer_norm(markers)
     s1 = m.scorer1(s0)
     g1 = elementwise(gelu, s1)

@@ -1,7 +1,8 @@
 # Where the model forward runs. Every backend serves the same `Agent`/`predict` API; `load`
 # dispatches on the backend's type through `load_backend_model`. Optional backends live in
-# package extensions (ext/): Accelerate is declared here, while the GPU backend is Metal.jl's
-# own `MetalBackend()` (the JuliaGPU convention, as `CUDABackend()` for CUDA.jl).
+# package extensions (ext/): Accelerate is declared here, while the GPU backends are the GPU
+# packages' own types, `MetalBackend()` (Metal.jl) and `CUDABackend()` (CUDA.jl), following
+# the JuliaGPU convention.
 
 """
     Backend
@@ -13,6 +14,7 @@ Supertype of Laya's own backends. Pass a backend to [`load`](@ref) as `backend`:
 | [`CPUBackend()`](@ref CPUBackend) | CPU, Julia's current BLAS | – |
 | [`AccelerateBackend()`](@ref AccelerateBackend) | CPU, Apple Accelerate BLAS | `using AppleAccelerate` |
 | `MetalBackend()` | Apple GPU (Metal.jl's backend type) | `using Metal` |
+| `CUDABackend()` | NVIDIA GPU (CUDA.jl's backend type) | `using CUDA` |
 | `LayaMLX.MLXBackend()` | Apple GPU via MLX | the `LayaMLX` package |
 
 A new backend only needs a method of [`load_backend_model`](@ref) for its type.
@@ -55,7 +57,7 @@ load_backend_model(::AccelerateBackend, _, _) =
     throw(ArgumentError("AccelerateBackend needs `using AppleAccelerate` (install it with `Pkg.add(\"AppleAccelerate\")`)"))
 
 load_backend_model(backend, _, T) =
-    throw(ArgumentError("Laya has no model for backend $(repr(backend)) with dtype $T; for the GPU use `using Metal` and `MetalBackend()`"))
+    throw(ArgumentError("Laya has no model for backend $(repr(backend)) with dtype $T; for the GPU use `using Metal` and `MetalBackend()`, or `using CUDA` and `CUDABackend()`"))
 
 const ACCELERATE_HINT_SHOWN = Ref(false)
 

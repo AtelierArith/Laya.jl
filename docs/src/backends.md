@@ -13,6 +13,9 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=AccelerateBackend())
 using Metal                                                         # Apple GPU
 agent = Laya.load("aac6fef/laya-mlx"; dtype=Float16, backend=MetalBackend())
 
+using CUDA                                                          # NVIDIA GPU
+agent = Laya.load("aac6fef/laya-mlx"; backend=CUDABackend())
+
 using LayaMLX                                                       # Apple GPU via MLX
 agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 ```
@@ -22,6 +25,7 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 | [`CPUBackend`](@ref)`()` | CPU (any OS) | – |
 | [`AccelerateBackend`](@ref)`()` | CPU, BLAS through Apple Accelerate | AppleAccelerate (weak dependency) |
 | `MetalBackend()` | Apple GPU, `Float32` or `Float16` | Metal.jl (weak dependency; Metal.jl's own backend type) |
+| `CUDABackend()` | NVIDIA GPU, `Float32` or `Float16` | CUDA.jl 6 (weak dependency; CUDA.jl's own backend type) |
 | `MLXBackend()` | Apple GPU through mlx-c | `LayaMLX` (in `LayaMLX/` of the repository) |
 
 ## CPU
@@ -57,6 +61,27 @@ extension `LayaMetalExt` specializes a few hot spots for `MtlArray`:
   GC does not see GPU memory pressure, and Metal.jl passes kernel arguments by GPU address,
   so a buffer may not go back to Metal while queued work can still touch it; the pool only
   frees when it exceeds a quarter of the recommended working set, after waiting for the GPU.
+
+## CUDA
+
+`CUDABackend()` (extension `LayaCUDAExt`) runs the same code with its weights in `CuArray`s:
+
+- the linear layers through `cublasGemmEx`, with the weights stored transposed (still the
+  `(in, out)` matrix for the generic code, as a `transpose` of the `(out, in)` array), which
+  lets cuBLAS use its NN kernels (10-15% faster for 93 or more than 4000 tokens). Float16
+  accumulates in Float32; Float32 follows `CUDA.math_mode()` (full FP32 by default);
+- one fused attention kernel for head_dim 64: a block of 128 threads takes 64 queries of one
+  head, keeps Q in shared memory, stages each 32-key tile of K and V (RoPE on the way in) and
+  computes S and O as register-tiled FP32 outer products with an online softmax; the masks
+  are read from the [`Laya.AttentionMask`](@ref) structure, so tiles outside the local window
+  or fully padded are skipped. Other head sizes, and plain dense masks, use strided-batched
+  cuBLAS products and a masked softmax kernel;
+- LayerNorm with one warp per column (statistics in `Float32`, fused with the residual sum),
+  GeGLU and the small steps of the head as kernels;
+- a buffer pool keyed by stream and size (released buffers are reused in stream order) and
+  pinned staging memory for uploads (copies from pageable memory would wait for the whole
+  stream): a warm forward pass allocates no device memory and synchronizes only at its two
+  downloads.
 
 ## MLX
 
