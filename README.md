@@ -14,8 +14,8 @@ same checkpoints, prompt format, calibration and output schema.
   - Pure Julia on the CPU, so it runs on any OS.
   - Includes the safetensors reader, the ModernBERT encoder and decision head, the Hugging
     Face tokenizer and the prompt builder.
-  - Depends only on JSON, Scratch and the standard libraries. Apple Accelerate (CPU) and
-    Metal.jl (GPU) are optional package extensions.
+  - Depends only on JSON, Scratch and the standard libraries. Apple Accelerate (CPU),
+    Metal.jl (Apple GPU) and CUDA.jl (NVIDIA GPU) are optional package extensions.
 - **`LayaMLX`** (`LayaMLX/`): the same forward pass on Apple's MLX (GPU), through the mlx-c C
   API. It is a separate package for Apple silicon that plugs into `Laya` as a backend, and
   `Laya` does not depend on it.
@@ -57,6 +57,9 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=AccelerateBackend())
 using Metal                                                         # Apple GPU
 agent = Laya.load("aac6fef/laya-mlx"; dtype=Float16, backend=MetalBackend())
 
+using CUDA                                                          # NVIDIA GPU
+agent = Laya.load("aac6fef/laya-mlx"; backend=CUDABackend())
+
 using LayaMLX                                                       # Apple GPU via MLX
 agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 ```
@@ -66,6 +69,7 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
 | `CPUBackend()` | CPU (any OS) | – |
 | `AccelerateBackend()` | CPU, BLAS through Apple Accelerate | AppleAccelerate (weak dependency) |
 | `MetalBackend()` | Apple GPU, Float32 or Float16 | Metal.jl (weak dependency; Metal.jl's own backend type) |
+| `CUDABackend()` | NVIDIA GPU, Float32 or Float16 | CUDA.jl 6 (weak dependency; CUDA.jl's own backend type) |
 | `MLXBackend()` | Apple GPU through mlx-c | `LayaMLX` (`LayaMLX/`) |
 
 - `AccelerateBackend` forwards BLAS process-wide, so every CPU model in the process uses
@@ -75,6 +79,14 @@ agent = Laya.load("aac6fef/laya-mlx"; backend=MLXBackend())
   units, no score matrices in memory, masked tiles skipped), simdgroup LayerNorm and GeGLU
   kernels, MPSGraph matmuls for the linear layers, and a buffer pool so that a warm forward
   pass allocates no device memory.
+- `CUDABackend` (`LayaCUDAExt`) does the same with `CuArray`s: cuBLAS `GemmEx` for the
+  linear layers (weights stored transposed so cuBLAS runs its faster NN kernels; Float16
+  accumulates in Float32; Float32 stays full FP32 unless you opt into TF32 with
+  `CUDA.math_mode!(CUDA.FAST_MATH)`), a fused FP32 flash-attention kernel for head_dim 64
+  (skips tiles outside the local window and padding), warp-per-column LayerNorm, a buffer
+  pool and pinned staging for uploads: a warm forward allocates no device memory and waits
+  for the GPU only at its two downloads. Pick the GPU with `CUDA.device!` or
+  `CUDA_VISIBLE_DEVICES`.
 - A new backend only needs a method of `Laya.load_backend_model(backend, dir, dtype)`.
 
 ### Checkpoints
@@ -115,6 +127,9 @@ Every backend is checked against the Python implementation (see `test/runtests.j
 - **Metal**: the selected answers match. The relative error of the logits is about 1e-6
   in float32 and about 2e-3 in float16.
 - **`LayaMLX`**: bit-identical (0.0 error) in float32 and float16, on both checkpoints.
+- **CUDA**: compared with the CPU backend (`LAYA_TEST_GROUPS=cuda`, no Python needed): the
+  selected answers match, the logits agree to about 2e-6 relative in float32 (about 1e-3 in
+  float16), and repeated forwards are bitwise identical.
 
 On the CPU the heavy work is BLAS: each `Linear` layer is a single
 `transpose(W) * X` GEMM (`src/layers.jl`) and attention uses `mul!`
@@ -156,6 +171,19 @@ asks N questions about a short state (93 tokens); `long:N` uses a state that fil
   1.1-2x slower than MLX. `LayaMLX` matched Python on that machine up to 50 short questions;
   the CPU backend with Accelerate took 109 ms / 796 ms / 5366 ms for `short:1/10/50`.
 
+NVIDIA RTX 3060 (12 GB, sm_86; CUDA.jl 6.4, CUDA 13.4) vs the CPU backend on a Xeon
+E5-2699 v3 (18 cores, OpenBLAS, `-t auto`), Linux, `aac6fef/laya-mlx`, end-to-end p50 as
+above (`benchmark/bench_julia.jl`, CUDA: 15 iterations after 3 warmups, CPU: 10 after 2):
+
+| backend | short:1 | short:10 | short:50 | long:1 | long:10 |
+|---|---:|---:|---:|---:|---:|
+| `CPUBackend()` (Float32) | 522 ms | 2931 ms | 11575 ms | 1857 ms | 14411 ms |
+| `CUDABackend()` (Float32) | 17 ms | 114 ms | 470 ms | 75 ms | 597 ms |
+| `CUDABackend()` (Float16) | 11 ms | 49 ms | 212 ms | 34 ms | 291 ms |
+
+In Float32 about three quarters of the GPU time is cuBLAS SGEMM at ~7.5 TFLOP/s (see
+`docs/agents/cuda.md`).
+
 See `benchmark/` for the method and the raw results.
 
 ## Repository layout
@@ -164,10 +192,10 @@ See `benchmark/` for the method and the raw results.
 |---|---|
 | `src/` | the `Laya` package |
 | `test/` | tests against the Python reference |
-| `ext/` | package extensions: `LayaAppleAccelerateExt` and `LayaMetalExt` |
+| `ext/` | package extensions: `LayaAppleAccelerateExt`, `LayaMetalExt` and `LayaCUDAExt` |
 | `LayaMLX/` | MLX backend. Clang.jl-generated mlx-c bindings, forward pass and benchmark (see `LayaMLX/README.md`). |
 | `reference/` | `LayaMLXReference`: a PythonCall bridge to `extern/laya-mlx`, used only for testing |
-| `benchmark/` | Python, CPU, Metal and MLX benchmarks (see `benchmark/README.md`) |
+| `benchmark/` | Python, CPU, Metal, CUDA and MLX benchmarks (see `benchmark/README.md`) |
 | `deps/` | the `mlx-c` submodule and `build.sh` |
 | `extern/laya-mlx` | upstream laya-mlx (submodule): the Python reference for tests and benchmarks |
 

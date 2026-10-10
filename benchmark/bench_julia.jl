@@ -1,5 +1,6 @@
 # Benchmark the Julia Laya runtime (one checkpoint per process) on the CPU or, with
-# `--backend metal`, on the Apple GPU through Metal.jl.
+# `--backend metal`, on the Apple GPU through Metal.jl, or with `--backend cuda` on an NVIDIA
+# GPU through CUDA.jl (select the GPU with `CUDA_VISIBLE_DEVICES`).
 #
 #     julia --project=benchmark benchmark/bench_julia.jl --model aac6fef/laya-mlx --output results/x.json
 #     julia --project=benchmark benchmark/bench_julia.jl --backend metal --dtype float16 --output results/y.json
@@ -21,6 +22,8 @@ end
 option(name, default) = (i = findfirst(==("--" * name), ARGS)) === nothing ? default : ARGS[i+1]
 if option("backend", "cpu") == "metal"
     using Metal
+elseif option("backend", "cpu") == "cuda"
+    using CUDA
 end
 
 const HERE = @__DIR__
@@ -72,10 +75,12 @@ function main(args)
     warmup, iterations = parse(Int, opts["warmup"]), parse(Int, opts["iterations"])
 
     backend = opts["backend"] == "metal" ? MetalBackend() :
+              opts["backend"] == "cuda" ? CUDABackend() :
               opts["blas"] == "accelerate" ? AccelerateBackend() : CPUBackend()
     load_seconds = @elapsed agent = Laya.load(opts["model"]; dtype, batch_size, backend)
     report = Dict{String,Any}(
-        "backend" => opts["backend"] == "metal" ? "julia-metal-gpu" : "julia-cpu-" * opts["blas"],
+        "backend" => opts["backend"] == "metal" ? "julia-metal-gpu" :
+                     opts["backend"] == "cuda" ? "julia-cuda-gpu" : "julia-cpu-" * opts["blas"],
         "created_at" => string(now(UTC)),
         "environment" => Dict(
             "julia" => string(VERSION),
@@ -84,6 +89,7 @@ function main(args)
             "blas_threads" => BLAS.get_num_threads(),
             "cpu" => Sys.cpu_info()[1].model,
             "machine" => string(Sys.ARCH),
+            "gpu" => opts["backend"] == "cuda" ? CUDA.name(CUDA.device()) : nothing,
         ),
         "model" => opts["model"],
         "dtype" => opts["dtype"],
